@@ -20,11 +20,11 @@ def _convert_wiki_links(text, cfg=None):
     def repl_pipe(m):
         name = m.group(1)
         disp = m.group(2)
-        return disp if mode == 'text' else f"{disp} (https://notes.meliplug.info/{name})"
+        return disp if mode == 'text' else f"{disp} (https://llmwiki.meliplug.info/{name})"
     text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', repl_pipe, text)
     def repl(m):
         name = m.group(1)
-        return name if mode == 'text' else f"{name} (https://notes.meliplug.info/{name})"
+        return name if mode == 'text' else f"{name} (https://llmwiki.meliplug.info/{name})"
     text = re.sub(r'\[\[([^\]]+)\]\]', repl, text)
     return text
 
