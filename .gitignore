@@ -1,0 +1,7 @@
+secrets.json
+index.json
+logs/
+.lock
+__pycache__/
+*.pyc
+.env

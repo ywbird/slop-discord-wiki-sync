@@ -1,0 +1,40 @@
+{
+  "vault_root": "/home/ywbird/Documents/wiki",
+  "index_path": "index.json",
+  "logs_dir": "logs",
+  "defaults": {
+    "forum_id": null,
+    "forum_tags": [],
+    "limit": 1900,
+    "buffer_policy": {
+      "mode": "adaptive",
+      "min": 2,
+      "max": 10,
+      "ratio": 0.5
+    },
+    "snapshot_attachment": true,
+    "callout_mode": "quote",
+    "wiki_link_mode": "text",
+    "image": {
+      "max_bytes": 9500000,
+      "max_width": 1600,
+      "format": "preserve",
+      "one_image_per_slot": true
+    },
+    "rate_limit": {
+      "min_interval_ms": 350,
+      "max_retries": 5
+    }
+  },
+  "notes": {
+    "pages/topics/피라네시.md": {
+      "forum_id": "1559982578881011752"
+    },
+    "pages/topics/픽션들.md": {
+      "forum_id": "1559982578881011752",
+      "forum_tags": [
+        "1559988468501844069"
+      ]
+    }
+  }
+}
