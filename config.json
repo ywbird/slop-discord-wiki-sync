@@ -3,8 +3,10 @@
   "index_path": "index.json",
   "logs_dir": "logs",
   "defaults": {
-    "forum_id": null,
-    "forum_tags": [],
+    "forum_id": "1451142756495003658",
+    "forum_tags": [
+      "1559989396378353684"
+    ],
     "limit": 1900,
     "buffer_policy": {
       "mode": "adaptive",
@@ -26,15 +28,5 @@
       "max_retries": 5
     }
   },
-  "notes": {
-    "pages/topics/피라네시.md": {
-      "forum_id": "1559982578881011752"
-    },
-    "pages/topics/픽션들.md": {
-      "forum_id": "1559982578881011752",
-      "forum_tags": [
-        "1559988468501844069"
-      ]
-    }
-  }
+  "notes": {}
 }
