@@ -410,6 +410,107 @@ def u18_config_notes_forum_id_resolves_in_sync():
         discord_api.DiscordAPI = original
 
 
+def u19_thread_title_sync():
+    import json as _json
+    import tempfile
+    import contextlib
+    import io
+    from sync import cli, discord_api, state as state_mod
+    from pathlib import Path
+
+    # desired title: frontmatter title, else stem; truncated to 100 code points
+    assert cli._desired_title({"title": "UBL"}, "/x/ignored.md") == "UBL"
+    assert cli._desired_title({}, "/x/My Note.md") == "My Note"
+    assert cli._desired_title({"title": "a" * 150}, "/x/n.md") == "a" * 100
+
+    d = tempfile.mkdtemp()
+    vault = os.path.join(d, "vault")
+    os.makedirs(os.path.join(vault, "pages"), exist_ok=True)
+    note = os.path.join(vault, "pages", "ttl.md")
+    open(note, "w", encoding="utf-8").write(
+        "---\ntitle: UBL\ndiscord_sync:\n  enabled: true\n---\n\nhello\n")
+    idx = os.path.join(d, "index.json")
+    cfg_path = os.path.join(d, "config.json")
+    _json.dump({"vault_root": vault, "index_path": idx,
+                "defaults": {"forum_id": "F1", "limit": 1900}},
+               open(cfg_path, "w"))
+
+    state = {"constructed": 0, "name_patches": []}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            state["constructed"] += 1
+
+        def get_channel(self, f):
+            return {"available_tags": []}
+
+        def create_thread(self, f, name, *a, **k):
+            return {"id": "T1", "name": name}
+
+        def create_message(self, *a, **k):
+            return {"id": "m", "attachments": []}
+
+        def edit_channel(self, ch, payload):
+            if "name" in payload:
+                state["name_patches"].append(payload["name"])
+            return {"name": payload.get("name", "T1")}
+
+        def edit_message(self, ch, mid, c, att, files=None, flags=None):
+            return {"id": mid, "attachments": []}
+
+        def get_message(self, ch, mid):
+            return {"id": mid, "attachments": []}
+
+    original = discord_api.DiscordAPI
+    discord_api.DiscordAPI = lambda t, c=None: Fake()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["publish", "pages/ttl.md", "--config", cfg_path])
+        assert state_mod.load_index(idx)["notes"]["pages/ttl.md"]["thread_name"] == "UBL"
+
+        # change title -> exactly one name PATCH, index updated to returned name
+        open(note, "w", encoding="utf-8").write(
+            "---\ntitle: UBL 개요\ndiscord_sync:\n  enabled: true\n---\n\nhello\n")
+        # --diff must show the pending title change, still 0 HTTP
+        buf = io.StringIO()
+        before = state["constructed"]
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["sync", "pages/ttl.md", "--dry-run", "--diff", "--config", cfg_path])
+        assert rc == 0 and state["constructed"] == before
+        assert "set_title" in buf.getvalue(), buf.getvalue()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["sync", "pages/ttl.md", "--config", cfg_path])
+        assert rc == 0
+        assert state["name_patches"] == ["UBL 개요"], state
+        assert state_mod.load_index(idx)["notes"]["pages/ttl.md"]["thread_name"] == "UBL 개요"
+
+        # immediate rerun -> 0 HTTP (no DiscordAPI constructed)
+        before = state["constructed"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["sync", "pages/ttl.md", "--config", cfg_path])
+        assert rc == 0 and state["constructed"] == before
+        assert len(state["name_patches"]) == 1
+
+        # revert -> one more PATCH
+        open(note, "w", encoding="utf-8").write(
+            "---\ntitle: UBL\ndiscord_sync:\n  enabled: true\n---\n\nhello\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["sync", "pages/ttl.md", "--config", cfg_path])
+        assert state["name_patches"] == ["UBL 개요", "UBL"]
+
+        # dry-run compares against stored thread_name only (0 HTTP), reports action
+        buf = io.StringIO()
+        before = state["constructed"]
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["sync", "pages/ttl.md", "--dry-run", "--json", "--config", cfg_path])
+        assert rc == 0 and state["constructed"] == before
+        out = _json.loads(buf.getvalue())
+        assert out["thread_name"] == {"desired": "UBL", "applied": "UBL", "action": "noop"}
+    finally:
+        discord_api.DiscordAPI = original
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("u") and callable(v)]
     failed = 0

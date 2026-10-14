@@ -63,13 +63,19 @@ def _resolve_note(arg, cfg):
     return text, path
 
 
-def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags):
+def _desired_title(fm, path):
+    t = fm.get("title") or Path(path).stem
+    return t[:100]
+
+
+def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags, thread_name):
     out = {
         "note": note_rel,
         "action": action,
         "mode": "dry-run",
         "content_hash": apply_mod.plan_content_hash(slots),
         "limit": 1900,
+        "thread_name": thread_name,
         "forum_tags": forum_tags,
         "plan": [{"i": s.i, "role": s.role,
                   "chars": len(getattr(s, "content", "")),
@@ -136,17 +142,31 @@ def main(argv=None):
         print(f"tag error: {e}", file=sys.stderr)
         return 2
 
+    desired_title = _desired_title(fm, path)
+
     if args.dry_run:
         index = state_mod.load_index(cfg.get("index_path", "index.json"))
         entry = index["notes"].get(note_rel, {})
+        applied_title = entry.get("thread_name")
+        title_action = "noop" if applied_title == desired_title else "patch"
+        thread_name = {"desired": desired_title, "applied": applied_title, "action": title_action}
         ops = diff_plan(slots, entry.get("slots", []))
         if args.diff:
             for o in ops:
                 print(f"{o['kind']:16} i={o['i']:3} {o.get('from','')}->{o.get('to',o.get('target_role',''))}")
+            if title_action == "patch":
+                left = applied_title if applied_title is not None else "(없음)"
+                print(f"{'set_title':16} {left!r} -> {desired_title!r}")
             if tags.diff_tags(target_tags, entry.get("forum_tags", [])):
                 print(f"{'set_tags':16} {target_tags}")
         else:
-            _print_dry_run(note_rel, "sync", slots, policy, ops, target_tags)
+            if not args.json:
+                if title_action == "patch":
+                    left = applied_title if applied_title is not None else "(없음)"
+                    print(f'제목: {left!r} -> {desired_title!r} (PATCH)')
+                else:
+                    print(f'제목: {desired_title!r} (noop)')
+            _print_dry_run(note_rel, "sync", slots, policy, ops, target_tags, thread_name)
         return 0
 
     if args.cmd == "status":
@@ -204,6 +224,10 @@ def _do_adopt(args, cfg, path, note_rel, body, fm, ds, slots):
         return 1
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
     thread_id = args.post_id
+    try:
+        thread_name = (api.get_channel(thread_id) or {}).get("name")
+    except Exception:  # noqa: BLE001
+        thread_name = None
     state_slots = []
     i = 0
     while True:
@@ -217,7 +241,8 @@ def _do_adopt(args, cfg, path, note_rel, body, fm, ds, slots):
             })
         i += len(msgs)
         break
-    _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots)
+    _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
+             thread_name=thread_name)
     print(f"adopted {note_rel} -> {thread_id} ({len(state_slots)} messages)")
     return 0
 
@@ -255,9 +280,10 @@ def _do_rebalance(args, cfg, path, note_rel, body, fm, ds, slots):
     old_thread = entry.get("thread_id")
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
     forum_id = _resolve_forum_id(ds, cfg, note_rel, entry)
-    title = fm.get("title") or Path(path).stem
-    thread = api.create_thread(forum_id, title[:100], {"content": f"# {title}\n"})
+    title = _desired_title(fm, path)
+    thread = api.create_thread(forum_id, title, {"content": f"# {title}\n"})
     thread_id = thread["id"]
+    thread_name = thread.get("name") or title
     state_slots = []
     for s in slots:
         apply_mod._apply_create(api, thread_id, {"kind": "create", "i": s.i, "target": s}, state_slots)
@@ -267,7 +293,8 @@ def _do_rebalance(args, cfg, path, note_rel, body, fm, ds, slots):
             api.edit_channel(old_thread, {"archived": True, "locked": True})
         except Exception:  # noqa: BLE001
             pass
-    _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots, forum_id=forum_id)
+    _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
+             forum_id=forum_id, thread_name=thread_name)
     print(f"rebalanced {note_rel}: {old_thread} -> {thread_id}")
     return 0
 
@@ -296,7 +323,7 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
         print("no forum_id (skip)", file=sys.stderr)
         return 2
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
-    title = fm.get("title") or Path(path).stem
+    title = _desired_title(fm, path)
     starter = f"# {title}\n\n-# 마지막 동기화: (게시 직후)\n"
 
     target_tags = tags.resolve_target_tags(fm, cfg, note_rel)
@@ -305,16 +332,17 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
         print(w, file=sys.stderr)
 
     try:
-        thread = api.create_thread(forum_id, title[:100], {"content": starter},
+        thread = api.create_thread(forum_id, title, {"content": starter},
                                    applied_tags=applied or None)
     except DiscordError as e:
         if applied:
             print(f"tag apply failed ({e}); retrying without tags", file=sys.stderr)
             applied = []
-            thread = api.create_thread(forum_id, title[:100], {"content": starter})
+            thread = api.create_thread(forum_id, title, {"content": starter})
         else:
             raise
     thread_id = thread["id"]
+    thread_name = thread.get("name") or title
 
     state_slots = []
     failures = []
@@ -326,7 +354,7 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
             failures.append({"i": s.i, "error": str(e)})
 
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=applied, forum_id=forum_id)
+             forum_tags=applied, forum_id=forum_id, thread_name=thread_name)
     print(f"published {note_rel} -> thread {thread_id} ({len(state_slots)} slots, {len(failures)} failures)")
     return 0 if not failures else 4
 
@@ -346,12 +374,17 @@ def _do_sync(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
     applied_now = entry.get("forum_tags", [])
     tags_changed = tags.diff_tags(target_tags, applied_now)
 
+    desired_title = _desired_title(fm, path)
+    applied_title = entry.get("thread_name")
+    title_changed = applied_title != desired_title
+
     ops = diff_plan(slots, state_slots)
-    if not ops and not tags_changed:
+    if not ops and not tags_changed and not title_changed:
         print(f"no-op: {note_rel}")
         return 0
 
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
+    failures = []
     if tags_changed:
         from .discord_api import DiscordError
         applied, warnings = _resolve_applied_tags(api, forum_id, target_tags)
@@ -366,20 +399,30 @@ def _do_sync(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
                 api.edit_channel(thread_id, {"applied_tags": []})
         applied_now = applied
 
+    channel_payload = {"archived": False, "locked": False}
+    if title_changed:
+        channel_payload["name"] = desired_title
+    from .discord_api import DiscordError
+    try:
+        resp = api.edit_channel(thread_id, channel_payload)
+        if "name" in channel_payload:
+            applied_title = (resp or {}).get("name") or desired_title
+    except DiscordError as e:
+        print(f"thread patch failed: {e}", file=sys.stderr)
+        failures.append({"op": "channel_patch", "error": str(e)})
+
     if ops:
-        api.edit_channel(thread_id, {"archived": False, "locked": False})
-        _, failures = apply_mod.apply_ops(api, thread_id, ops, state_slots)
-    else:
-        failures = []
+        _, slot_failures = apply_mod.apply_ops(api, thread_id, ops, state_slots)
+        failures.extend(slot_failures)
 
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=applied_now, forum_id=forum_id)
+             forum_tags=applied_now, forum_id=forum_id, thread_name=applied_title)
     print(f"synced {note_rel} ({len(ops)} ops, {len(failures)} failures)")
     return 0 if not failures else 4
 
 
 def _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=None, forum_id=None):
+             forum_tags=None, forum_id=None, thread_name=None):
     from .discord_api import DiscordAPI  # noqa: F401
     new_ds = dict(ds)
     new_ds["enabled"] = True
@@ -395,17 +438,19 @@ def _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
         forum_tags = existing.get("forum_tags", [])
     if forum_id is None:
         forum_id = new_ds.get("forum_id") or existing.get("forum_id")
-    index["notes"][note_rel] = {
-        "forum_id": forum_id,
-        "thread_id": str(thread_id),
-        "content_hash": new_ds["content_hash"],
-        "synced_at": new_ds["synced_at"],
-        "forum_tags": list(forum_tags),
-        "slots": [
-            {k: v for k, v in s.items() if v is not None}
-            for s in state_slots
-        ],
-    }
+    if thread_name is None:
+        thread_name = existing.get("thread_name")
+    entry = {"forum_id": forum_id, "thread_id": str(thread_id)}
+    if thread_name is not None:
+        entry["thread_name"] = thread_name
+    entry["content_hash"] = new_ds["content_hash"]
+    entry["synced_at"] = new_ds["synced_at"]
+    entry["forum_tags"] = list(forum_tags)
+    entry["slots"] = [
+        {k: v for k, v in s.items() if v is not None}
+        for s in state_slots
+    ]
+    index["notes"][note_rel] = entry
     state_mod.save_index(cfg.get("index_path", "index.json"), index)
 
 

@@ -14,6 +14,13 @@ Before coding, verify **O-1–O-7** in §19 against a test forum and record resu
 - O-4–O-6: misc permissions/volume/Pillow need.
 - O-7: does `applied_tags` on `POST threads` actually apply tags? What happens with >5 or unknown IDs?
 
+## Production defaults (2026-10-15)
+- Forum: `1451142756495003658` (guild `761435154588631060` = Cognipotato, forum `도`), tag `1559989396378353684` (`bot`).
+- Set in `config.json` `defaults.forum_id` / `defaults.forum_tags`. No per-note overrides (`notes` is empty) - the vault notes inherit the defaults.
+- Old test forum `1559982578881011752` (guild `906454588276756490` = Nycko Server, `ㅅㄷㄴ`, tag `1559988468501844069` = `ㅅㄴ`) is no longer used. Its two leftover threads (피라네시, 픽션들) are orphaned in the index.
+- 2026-10-15: all 12 published vault notes posted to the production forum via `sync.py publish` (12/12, 0 failures), rerun via `sync --all` = all no-op.
+- Workflow rule from 도이: when asked to publish a note without naming a target, upload to **both** the Digital Garden and this Discord forum.
+
 ## Implementation order
 M1 (pure, no network) → M2 (publish) → M3 (sync) → M4 (images) → M5 (ops). `--dry-run` must make **0 HTTP calls** (enforce via HTTP layer counter).
 
@@ -25,6 +32,7 @@ M1 (pure, no network) → M2 (publish) → M3 (sync) → M4 (images) → M5 (ops
 - **Content slots**: must have no attachments. Image slots own attachments. Empty content is not allowed (use placeholder).
 - **No-op by hash**: skip edits if role+hash unchanged. Top-level `content_hash` gates sync.
 - **Forum tags**: on create, send `applied_tags` (IDs from frontmatter `discord_sync.forum_tags` > `config.notes[...]` > `defaults.forum_tags`). Validate against the forum's `available_tags`, max 5, drop unknown with a warning. See SPEC §13.7.
+- **Thread title sync (§13.8)**: desired = frontmatter `title` else filename stem, truncated to 100 code points. Applied = `index.json` `thread_name` (never frontmatter). Merge `name` into the §13.2 state PATCH only when it differs; store the PATCH/GET response `name` (not the request value). No-op only when slots + tags + title are all unchanged (0 HTTP).
 - **Atomic writes**: write temp + `os.replace` for `index.json`. Keep YAML frontmatter intact (2-space indent), preserve other keys.
 
 ## Module layout

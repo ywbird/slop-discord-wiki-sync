@@ -1,7 +1,8 @@
 # Discord 동기화 시스템 (wiki -> Discord 포럼) - 구현 스펙 v1.0
 
-- 상태: **설계 확정, 구현 미착수.** 이 문서는 코딩 에이전트 핸드오프용이다.
+- 상태: **설계 확정, 구현 완료(M1~M5, §13.7 태그 포함).** 이 문서는 코딩 에이전트 핸드오프용이다.
 - 작성: 2026-10-14 (v0.1 -> v1.0 재작성)
+- v1.1 (2026-10-15): **§13.8 제목(스레드 이름) 동기화 추가.** 현재 구현은 게시 시점에만 제목을 넣고 이후에는 갱신하지 않는다(스펙 누락). 이 변경으로 §11.4, §6.2, §15.3, §17.2, §19(O-4)가 함께 갱신된다.
 - 대상 독자: 이 스펙만 읽고 구현할 수 있는 코딩 에이전트. 프로젝트 사전 지식 없음을 가정한다.
 - 요약: LLM 위키 볼트의 마크다운 노트 1개를 Discord 포럼 글 1개로 게시하고, 이후 노트 수정을 **메시지 편집만으로** 반영한다.
 
@@ -144,7 +145,7 @@ slop-discord-wiki-sync/
 | `buffer_policy.ratio` | `N = clamp(ceil(K * ratio), min, max)` (§12.1) |
 | `snapshot_attachment` | 꼬리에 전체 .md 첨부 슬롯을 유지할지 |
 | `callout_mode` | `quote`(콜아웃을 인용으로 변환) / `strip`(제거) |
-| `wiki_link_mode` | `text`(링크 텍스트만) / `url`(notes.meliplug.info URL 부착) |
+| `wiki_link_mode` | `text`(링크 텍스트만) / `url`(llmwiki.meliplug.info URL 부착) |
 | `image.one_image_per_slot` | true = 이미지 1장당 슬롯 1개(권장). false = 연속 이미지를 한 슬롯에 최대 10장 |
 | `image.max_width` | 초과 시 축소 재인코딩 |
 | `rate_limit.min_interval_ms` | 요청 사이 최소 간격(전역 직렬 큐) |
@@ -199,6 +200,7 @@ discord_sync:
       "forum_id": "1234567890",
       "guild_id": "111",
       "thread_id": "9876543210",
+      "thread_name": "UBL",
       "starter_id": "9999999999",
       "bot_id": "222",
       "content_hash": "sha256:abcd...",
@@ -220,6 +222,7 @@ discord_sync:
 }
 ```
 
+- `thread_name`은 **Discord에 실제로 적용된 스레드 이름**이다(§13.8). 원하는 값은 frontmatter `title`(없으면 파일명 stem)이므로 **[스레드 이름]은 frontmatter 스키마에 추가하지 않는다**(§6.1 스키마 불변). 이 키가 없거나 `null`이면 "적용값 미상"으로 보고 다음 동기화에서 1회 갱신을 시도한다.
 - `slots`는 **스레드 내 실제 순서와 1:1로 일치**해야 한다. `i`는 0부터 연속.
 - `hash`는 §9.5 규칙으로 계산한다. 같으면 그 슬롯은 이번 동기화에서 편집하지 않는다.
 - `attachment_id`는 §13.4의 유지 목록에 필요하다. 단 편집 직전에 API에서 재조회해 복구할 수 있다.
@@ -252,7 +255,7 @@ Discord는 위키링크·콜아웃·각주·수식을 지원하지 않는다. �
 | 입력 | 출력 | 비고 |
 |---|---|---|
 | YAML frontmatter | (제거) | 본문에 포함하지 않는다 |
-| `[[노트이름]]` | `노트이름` | `wiki_link_mode=url`이면 `노트이름 (https://notes.meliplug.info/<slug>)` |
+| `[[노트이름]]` | `노트이름` | `wiki_link_mode=url`이면 `노트이름 (https://llmwiki.meliplug.info/<slug>)` |
 | `[[노트이름\|표시]]` | `표시` | 파이프 뒤 텍스트를 쓴다 |
 | `![[파일.png]]` | **이미지 슬롯** | §9.3 |
 | `![[파일.png\|300]]` | 이미지 슬롯(크기 무시) | Discord는 크기 지정 미지원 |
@@ -414,7 +417,8 @@ def diff(plan, state):
 ### 11.4 동기화 (기존 글 반영)
 
 ```
-1. 스레드 상태 보정 (archived/locked 해제) — §13.2
+1. 스레드 상태 보정 + 제목 동기화 — §13.2, §13.8
+   (archived/locked 해제. 제목이 state.thread_name과 다를 때만 같은 PATCH에 "name"을 포함)
 2. 태그 갱신: 노트의 태그 집합이 state와 다르면 `applied_tags` PATCH (§13.7)
 3. ops 순서대로 적용
    - Edit            -> PATCH message (§13.4)
@@ -423,8 +427,10 @@ def diff(plan, state):
                         없으면 §12.3 폴백
 4. 스냅샷 슬롯 갱신 (내용 또는 원본 첨부가 바뀐 경우만)
 5. 버퍼 수가 정책 N보다 부족하면 스냅샷 앞에 새 버퍼를 생성해 보충
-6. 검증(§13.4) 후 frontmatter + index.json 기록
+6. 검증(§13.4) 후 frontmatter + index.json 기록(state.thread_name 포함)
 ```
+
+- 무변경 판정은 세 축을 모두 본다: 슬롯 ops가 비어 있고, 태그 집합이 같고, 제목이 state.thread_name과 같을 때만 `no-op`(HTTP 0회).
 
 ### 11.5 불변식 (테스트로 강제할 것)
 
@@ -472,7 +478,7 @@ def diff(plan, state):
 ### 12.5 스냅샷 슬롯
 
 - `snapshot_attachment=true`(기본)이면 꼬리(버퍼 뒤)에 1개 유지한다.
-- 내용: 안내 1줄 + `synced_at` + 원문 링크(notes.meliplug.info). 첨부: 노트 원본 .md.
+- 내용: 안내 1줄 + `synced_at` + 원문 링크(llmwiki.meliplug.info). 첨부: 노트 원본 .md.
 - 버퍼가 남아도 유지한다 -> 버퍼 소진 시에도 완전한 사본이 있다.
 - 갱신은 **같은 메시지 편집**으로 한다(새 파일 파트 + `attachments`에 새 파일 포함). 메시지를 삭제·재생성하지 않는다(순서 보존 + id churn 방지). 편집이 실패하면 그때만 삭제·재생성으로 폴백한다.
 - 원본 .md 해시가 같으면 편집하지 않는다.
@@ -500,7 +506,7 @@ POST /channels/{forum_id}/threads
 
 ```markdown
 # <노트 제목>
-<원문 링크(notes.meliplug.info)>
+<원문 링크(llmwiki.meliplug.info)>
 
 ## 목차
 - [<섹션 제목>](https://discord.com/channels/{guild}/{thread}/{slot_message_id})
@@ -510,7 +516,9 @@ POST /channels/{forum_id}/threads
 ```
 
 - 목차 딥링크는 슬롯 메시지 ID가 필요하므로 **최초 게시 시에는"(동기화 후 갱신)"으로 두고, 다음 동기화에서 채운다.**
-- 스타터는 `state.starter_id`로 별도 관리한다(`slots`에 넣지 않는다). 제목을 스레드 이름과 동기화: `PATCH /channels/{thread_id}` `{"name": "<title>"}`.
+- 스타터는 `state.starter_id`로 별도 관리한다(`slots`에 넣지 않는다).
+- **제목(스레드 이름) 동기화는 §13.8이 단일 소스다.** 생성 시에는 위 `name`이 그대로 스레드 이름이 되고, 이후 변경은 §13.8로 반영한다.
+- **범위 밖(미구현, 별도 과제):** 스타터 본문의 `# <제목>` 줄과 목차 딥링크 채우기는 어떤 마일스톤에도 구현되어 있지 않다(M5까지 완료 후에도 미구현). §13.8은 스레드 이름만 다룬다.
 
 ### 13.2 스레드 상태 보정 (매 동기화 시작 시)
 
@@ -518,7 +526,8 @@ POST /channels/{forum_id}/threads
 PATCH /channels/{thread_id}  { "archived": false, "locked": false }
 ```
 
-- C-3에 의해 권한 문제는 없다. 이미 정상이면 과금 없는 안전 호출이다(생략 가능하지만 유지 권장).
+- C-3에 의해 권한 문제는 없다. 이미 정상이면 비용 없는 안전 호출이다(생략 가능하지만 유지 권장).
+- 제목이 바뀌었을 때는 **이 호출에 `name`을 합쳐** 한 번에 보낸다(§13.8).
 
 ### 13.3 메시지 생성
 
@@ -588,6 +597,22 @@ PATCH /channels/{thread_id}/messages/{message_id}
   - `moderated: true` 태그는 MANAGE_THREADS 권한이 필요하다. 봇은 관리자 역할이라 통과하지만, 실패 시 경고하고 그 태그만 제외한다.
 - state: index.json 노트 항목에 `forum_tags`(실제 적용된 ID 배열)를 저장한다. frontmatter의 `discord_sync.forum_tags`는 **원하는 값**(입력), index의 값은 **적용된 값**이다. 둘을 비교해 갱신 여부를 판단한다.
 - `--dry-run` 출력에 `forum_tags`(해석된 ID 배열)를 포함한다. **dry-run은 HTTP 0회 불변식(§15.1)을 지켜야 하므로 이름 해석을 위해 네트워크를 호출하지 않는다** — ID만 출력하고, 이름은 로컬 캐시가 있을 때만 덧붙인다.
+
+### 13.8 제목(스레드 이름) 동기화
+
+위키에서 노트의 `title`을 바꾸면 포럼 글 제목도 따라 바뀌어야 한다(2026-10-15 추가). **구현 누락이었던 항목**이며, §13.1의 한 줄(제목 동기화)을 동기화 경로까지 확장한 것이다.
+
+- 원하는 값(desired): frontmatter `title` > 파일명 stem (§13.1과 동일 규칙).
+- 적용된 값(applied): `index.json` 노트 항목의 `thread_name`(§6.2).
+- 길이: 100자를 넘으면 100자로 자른다(코드포인트 기준, 기존 게시 동작과 동일). 제목이 비면 stem으로 폴백한다.
+- 호출: `PATCH /channels/{thread_id}` `{"archived": false, "locked": false, "name": "<desired>"}` — §13.2 상태 보정과 **같은 호출에 합쳐도 된다.** 제목이 같으면 `name` 키를 넣지 않는다.
+- `thread_name`이 없거나 `null`이면(구버전 state, adopt로 채워지지 않은 경우) 1회 갱신을 시도하고, 응답의 `name`을 저장한다. **항상 PATCH하지는 않는다**(매 동기화 churn 금지).
+- 저장: PATCH/GET 응답의 실제 `name` 값을 신뢰해 `index.json`의 `thread_name`에 기록한다(요청값을 그대로 쓰지 않는다). frontmatter에는 추가하지 않는다.
+- 무변경: `thread_name == desired`이면 호출도 저장도 하지 않는다.
+- 실패: 4xx는 경고 1줄 출력 후 슬롯 작업은 계속 진행하고, 실패 집계에 넣어 exit 4로 끝난다(§15.2). 5xx/429는 §13.5 재시도 규칙.
+- `--dry-run`: **HTTP 0회를 유지한다**(비교는 저장된 `thread_name`과만 한다). §15.3 출력 참조.
+- `adopt`: `GET /channels/{thread_id}`로 실제 `name`을 읽어 `thread_name`에 저장한다. 읽기 실패 시 키를 생략하고 다음 동기화에서 1회 갱신한다.
+- `rebalance`: 새 스레드를 만들므로 방금 만든 이름을 `thread_name`에 저장한다.
 
 ---
 
@@ -667,6 +692,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
   "mode": "dry-run",
   "content_hash": "sha256:...",
   "limit": 1900,
+  "thread_name": { "desired": "UBL", "applied": "UBL", "action": "noop" },
   "plan": [
     { "i": 0, "role": "content", "chars": 812, "preview": "# UBL\nUBL은 ...", "hash": "sha256:c1" },
     { "i": 1, "role": "image", "src": "raw/images/foo.png", "filename": "foo.png",
@@ -683,6 +709,9 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
   "warnings": ["이미지 파일 not found: raw/images/old.png"]
 }
 ```
+
+- `thread_name.action`은 `noop` 또는 `patch`다. `applied`는 `index.json`의 저장값이며, 없으면 `null`로 출력한다(이 경우 `action=patch`).
+- 사람이 읽는 출력에는 제목 한 줄을 추가한다: `제목: "UBL" (noop)` / 제목이 바뀌면 `제목: "UBL" -> "UBL 개요" (PATCH)`. **dry-run은 이 판단 때문에도 네트워크를 호출하지 않는다**(저장값과만 비교).
 
 ---
 
@@ -737,6 +766,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | U12 | 결정성 | 같은 입력 2회 -> 동일 계획·동일 해시 |
 | U13 | 태그 해석 우선순위 | frontmatter > notes > defaults, 없으면 빈 배열 |
 | U14 | 태그 검증 | 5개 초과 -> exit 2, 미등록 ID -> 경고 후 제외(네트워크 없이 mock) |
+| U15 | 제목 해석/비교 (§13.8) | `title` 없으면 stem 폴백, 100자 초과 시 100자 절단, `thread_name`과 같으면 `action=noop`, 다르거나 `null`이면 `action=patch` (네트워크 없음) |
 
 ### 17.2 통합 테스트 (M2 이후, 테스트 포럼 필요)
 
@@ -752,6 +782,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 8. 문서 축소 -> 남는 슬롯이 `-# (reserved)`로 복귀
 9. 댓글을 1개 단 후 7번 반복 -> 문서 상단 순서 불변
 10. 태그 지정 후 게시 -> 스레드에 태그가 붙음. 태그 변경 후 재동기화 -> PATCH로 갱신됨
+11. 제목 변경 후 재동기화 -> PATCH 1회로 스레드 이름이 바뀌고, index의 `thread_name`이 갱신되며 exit 0 (즉시 재실행 시 HTTP 0회). 제목을 되돌리면 다시 PATCH 1회
 
 ---
 
@@ -760,9 +791,9 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | 단계 | 범위 | 수용 기준 |
 |---|---|---|
 | M0 | §19 확인 3건 | O-1~O-3 결과를 SPEC에 기록 |
-| M1 | 설정/볼트 읽기/변환/청킹/diff + `--dry-run` | U1~U12 전부 통과, HTTP 호출 0회, `--dry-run --json` 스키마 준수 |
+| M1 | 설정/볼트 읽기/변환/청킹/diff + `--dry-run` | U1~U15 전부 통과, HTTP 호출 0회, `--dry-run --json` 스키마 준수 |
 | M2 | 게시 (스레드 + 슬롯 + 버퍼 + 스냅샷 + 태그) | 통합 1, 2, 10 통과. 실패 시에도 state가 일관 |
-| M3 | 동기화 (diff + 편집 + 버퍼 소비/반환) | 통합 3~5, 7, 8 통과 |
+| M3 | 동기화 (diff + 편집 + 버퍼 소비/반환 + 제목 동기화 §13.8) | 통합 3~5, 7, 8, 11 통과 |
 | M4 | 이미지 파이프라인 (해석/정규화/alt/폴백) | 통합 4, 6, 9 통과 + 업로드 실패 폴백 동작 |
 | M5 | 복구/운영 (`adopt`, `doctor`, `verify`, 락, 로그, rebalance) | `doctor`가 의도적 손상 state를 탐지, `adopt`로 복구 |
 
@@ -780,6 +811,8 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | O-2 | 내용이 제로폭 문자만인 메시지가 전송되는가 / `-# (reserved)`가 정상 전송되는가 | 테스트 채널에 두 종류 전송 | 거절되면 `-# (reserved)` 고정 유지 |
 | O-3 | 이미지 슬롯 렌더 위치가 문서 순서와 일치하는가 (C-1 최종 확인) | 텍스트-A, 이미지, 텍스트-B 3슬롯 게시 | 어긋나면 §9.3 재설계(이 경우 이미지를 앞 텍스트 슬롯에 붙이는 변형 검토) |
 | O-4 | 포럼 글 작성 후 봇이 `PATCH`로 `name`/`applied_tags`를 바꿀 수 있는가 | 실제 포럼에서 시도 | 안 되면 제목 동기화 제거 |
+
+- **O-4 확정(2026-10-15):** `applied_tags` PATCH는 실측 완료(태그 추가/제거 왕복 확인, 프로덕션 포럼). `name` PATCH는 미실측이지만 봇이 관리자 역할(C-3)이라 가능으로 판단하고 §13.8을 확정한다. 실패가 확인되면 §13.8의 PATCH를 제거하고 "제목 동기화 안 함"으로 되돌린다 — 그 경우 통합 테스트 11도 삭제한다.
 | O-5 | 실제 볼트 이미지의 크기 분포(10MB 초과 비율, 평균 폭) | 볼트 이미지 대상으로 `du`/`identify` | 10MB 초과가 많으면 Pillow 도입 확정 |
 | O-6 | `hidden` 상태 스레드에 대한 GET/PATCH 동작 | 아카이브/숨김 스레드에 시도 | 실패 시 가드 강화 |
 | O-7 | `POST threads`에 `applied_tags`를 실어 태그가 실제로 붙는가 / 5개 초과·미등록 ID 시 응답 | 테스트 포럼에서 태그 1~2개로 생성, 초과·미등록도 시도 | 초과·미등록이 400이면 §13.7 검증을 필수로 유지 |
