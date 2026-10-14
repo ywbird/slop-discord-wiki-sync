@@ -7,6 +7,7 @@
     "forum_tags": [
       "1559989396378353684"
     ],
+    "guild_id": "761435154588631060",
     "limit": 1900,
     "buffer_policy": {
       "mode": "adaptive",
@@ -16,7 +17,10 @@
     },
     "snapshot_attachment": true,
     "callout_mode": "quote",
-    "wiki_link_mode": "text",
+    "wiki_link_mode": "discord",
+    "wiki_link_style": "url",
+    "wiki_link_fallback": "garden",
+    "garden_base_url": "https://llmwiki.meliplug.info",
     "image": {
       "max_bytes": 9500000,
       "max_width": 1600,

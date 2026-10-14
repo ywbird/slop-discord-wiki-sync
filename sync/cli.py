@@ -6,21 +6,38 @@ from pathlib import Path
 
 from . import apply as apply_mod
 from . import config as config_mod
-from . import images, markdown, state as state_mod, tags
+from . import images, markdown, state as state_mod, tags, vault
 from .chunker import build_plan, diff as diff_plan
 
 
-def _build_slots(note_path, cfg, text, body):
+def _wiki_link_ctx(cfg, index):
+    d = cfg.get("defaults", {})
+    return {
+        "mode": d.get("wiki_link_mode", "discord"),
+        "style": d.get("wiki_link_style", "url"),
+        "fallback": d.get("wiki_link_fallback", "garden"),
+        "garden_base_url": d.get("garden_base_url", "https://llmwiki.meliplug.info"),
+        "index_notes": index.get("notes", {}),
+        "notes_cfg": cfg.get("notes", {}),
+        "defaults_guild_id": d.get("guild_id"),
+        "stem_map": vault.stem_map(cfg["vault_root"]),
+        "read_frontmatter": lambda rel: vault.read_frontmatter_file(Path(cfg["vault_root"]) / rel),
+    }
+
+
+def _build_slots(note_path, cfg, text, body, link_ctx=None):
+    d = cfg.get("defaults", {})
     blocks = markdown.parse_blocks(body)
-    plan = build_plan(blocks, cfg={"limit": cfg.get("defaults", {}).get("limit", 1900)})
+    blocks, link_stats = markdown.convert_blocks(blocks, d, link_ctx)
+    plan = build_plan(blocks, cfg={"limit": d.get("limit", 1900)})
     plan = apply_mod.enrich_image_slots(plan, note_path, cfg["vault_root"])
     K = len(plan)
-    policy = cfg.get("defaults", {}).get("buffer_policy", {})
+    policy = d.get("buffer_policy", {})
     N = apply_mod.buffer_count(K, policy.get("ratio", 0.5), policy.get("min", 2), policy.get("max", 10))
     buffers = apply_mod.buffer_plans(None, N)
     snapshot = None
-    if cfg.get("defaults", {}).get("snapshot_attachment", True):
-        from .chunker import SlotPlan, slot_hash_snapshot
+    if d.get("snapshot_attachment", True):
+        from .chunker import SlotPlan
         import hashlib
         h = hashlib.sha256(markdown.nfc(body).encode("utf-8")).hexdigest()
         snapshot = SlotPlan(K + N, "snapshot", content="-# 원본 마크다운 첨부",
@@ -29,7 +46,7 @@ def _build_slots(note_path, cfg, text, body):
     slots = plan + buffers + ([snapshot] if snapshot else [])
     for idx, s in enumerate(slots):
         s.i = idx
-    return slots, {"K": K, "N": N}
+    return slots, {"K": K, "N": N}, link_stats
 
 
 def cmd_doctor(args, cfg):
@@ -68,7 +85,14 @@ def _desired_title(fm, path):
     return t[:100]
 
 
-def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags, thread_name):
+def _starter_content(title):
+    """Forum starter message body. Kept in sync with the thread title."""
+    return f"# {title}\n\n-# 마지막 동기화: (게시 직후)\n"
+
+
+def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags, thread_name, link_stats):
+    warnings = list(link_stats.get("warnings", []))
+    warnings += [f"unresolved wiki link: {t}" for t in dict.fromkeys(link_stats.get("unresolved", []))]
     out = {
         "note": note_rel,
         "action": action,
@@ -76,6 +100,12 @@ def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags, thread_name
         "content_hash": apply_mod.plan_content_hash(slots),
         "limit": 1900,
         "thread_name": thread_name,
+        "wiki_links": {
+            "discord": link_stats.get("discord", 0),
+            "garden": link_stats.get("garden", 0),
+            "text": link_stats.get("text", 0),
+            "unresolved": list(dict.fromkeys(link_stats.get("unresolved", []))),
+        },
         "forum_tags": forum_tags,
         "plan": [{"i": s.i, "role": s.role,
                   "chars": len(getattr(s, "content", "")),
@@ -83,7 +113,7 @@ def _print_dry_run(note_rel, action, slots, policy, ops, forum_tags, thread_name
         "buffer_policy": policy,
         "ops": [{"kind": o["kind"], "i": o["i"],
                  "target_role": o.get("target_role", o.get("to"))} for o in ops],
-        "warnings": [],
+        "warnings": warnings,
     }
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
@@ -134,7 +164,15 @@ def main(argv=None):
     ds = fm.get("discord_sync") or {}
     note_rel = os.path.relpath(path, cfg["vault_root"])
 
-    slots, policy = _build_slots(path, cfg, text, body)
+    index = state_mod.load_index(cfg.get("index_path", "index.json"))
+    link_ctx = _wiki_link_ctx(cfg, index)
+    slots, policy, link_stats = _build_slots(path, cfg, text, body, link_ctx)
+    for w in link_stats["warnings"]:
+        print(w, file=sys.stderr)
+    if link_stats["unresolved"]:
+        uniq = list(dict.fromkeys(link_stats["unresolved"]))
+        print(f"unresolved wiki links: {', '.join(uniq)}", file=sys.stderr)
+
     target_tags = tags.resolve_target_tags(fm, cfg, note_rel)
     try:
         tags.check_max(target_tags)
@@ -145,11 +183,11 @@ def main(argv=None):
     desired_title = _desired_title(fm, path)
 
     if args.dry_run:
-        index = state_mod.load_index(cfg.get("index_path", "index.json"))
         entry = index["notes"].get(note_rel, {})
         applied_title = entry.get("thread_name")
         title_action = "noop" if applied_title == desired_title else "patch"
-        thread_name = {"desired": desired_title, "applied": applied_title, "action": title_action}
+        thread_name = {"desired": desired_title, "applied": applied_title,
+                       "action": title_action}
         ops = diff_plan(slots, entry.get("slots", []))
         if args.diff:
             for o in ops:
@@ -157,6 +195,7 @@ def main(argv=None):
             if title_action == "patch":
                 left = applied_title if applied_title is not None else "(없음)"
                 print(f"{'set_title':16} {left!r} -> {desired_title!r}")
+                print(f"{'set_starter':16} -> '# {desired_title}'")
             if tags.diff_tags(target_tags, entry.get("forum_tags", [])):
                 print(f"{'set_tags':16} {target_tags}")
         else:
@@ -166,7 +205,10 @@ def main(argv=None):
                     print(f'제목: {left!r} -> {desired_title!r} (PATCH)')
                 else:
                     print(f'제목: {desired_title!r} (noop)')
-            _print_dry_run(note_rel, "sync", slots, policy, ops, target_tags, thread_name)
+                n = link_stats["discord"] + link_stats["garden"] + link_stats["text"]
+                print(f"링크: {n}개 (discord {link_stats['discord']}, "
+                      f"garden {link_stats['garden']}, text {link_stats['text']})")
+            _print_dry_run(note_rel, "sync", slots, policy, ops, target_tags, thread_name, link_stats)
         return 0
 
     if args.cmd == "status":
@@ -224,10 +266,13 @@ def _do_adopt(args, cfg, path, note_rel, body, fm, ds, slots):
         return 1
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
     thread_id = args.post_id
+    thread_name = guild_id = None
     try:
-        thread_name = (api.get_channel(thread_id) or {}).get("name")
+        ch = api.get_channel(thread_id) or {}
+        thread_name = ch.get("name")
+        guild_id = ch.get("guild_id")
     except Exception:  # noqa: BLE001
-        thread_name = None
+        pass
     state_slots = []
     i = 0
     while True:
@@ -242,7 +287,7 @@ def _do_adopt(args, cfg, path, note_rel, body, fm, ds, slots):
         i += len(msgs)
         break
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             thread_name=thread_name)
+             thread_name=thread_name, guild_id=guild_id)
     print(f"adopted {note_rel} -> {thread_id} ({len(state_slots)} messages)")
     return 0
 
@@ -281,9 +326,10 @@ def _do_rebalance(args, cfg, path, note_rel, body, fm, ds, slots):
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
     forum_id = _resolve_forum_id(ds, cfg, note_rel, entry)
     title = _desired_title(fm, path)
-    thread = api.create_thread(forum_id, title, {"content": f"# {title}\n"})
+    thread = api.create_thread(forum_id, title, {"content": _starter_content(title)})
     thread_id = thread["id"]
     thread_name = thread.get("name") or title
+    guild_id = thread.get("guild_id")
     state_slots = []
     for s in slots:
         apply_mod._apply_create(api, thread_id, {"kind": "create", "i": s.i, "target": s}, state_slots)
@@ -294,7 +340,7 @@ def _do_rebalance(args, cfg, path, note_rel, body, fm, ds, slots):
         except Exception:  # noqa: BLE001
             pass
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_id=forum_id, thread_name=thread_name)
+             forum_id=forum_id, thread_name=thread_name, guild_id=guild_id)
     print(f"rebalanced {note_rel}: {old_thread} -> {thread_id}")
     return 0
 
@@ -324,7 +370,7 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
         return 2
     api = DiscordAPI(cfg["_token"], cfg.get("defaults", {}))
     title = _desired_title(fm, path)
-    starter = f"# {title}\n\n-# 마지막 동기화: (게시 직후)\n"
+    starter = _starter_content(title)
 
     target_tags = tags.resolve_target_tags(fm, cfg, note_rel)
     applied, warnings = _resolve_applied_tags(api, forum_id, target_tags)
@@ -343,6 +389,7 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
             raise
     thread_id = thread["id"]
     thread_name = thread.get("name") or title
+    guild_id = thread.get("guild_id")
 
     state_slots = []
     failures = []
@@ -354,7 +401,7 @@ def _do_publish(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
             failures.append({"i": s.i, "error": str(e)})
 
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=applied, forum_id=forum_id, thread_name=thread_name)
+             forum_tags=applied, forum_id=forum_id, thread_name=thread_name, guild_id=guild_id)
     print(f"published {note_rel} -> thread {thread_id} ({len(state_slots)} slots, {len(failures)} failures)")
     return 0 if not failures else 4
 
@@ -402,27 +449,40 @@ def _do_sync(args, cfg, path, note_rel, text, body, fm, ds, slots, policy):
     channel_payload = {"archived": False, "locked": False}
     if title_changed:
         channel_payload["name"] = desired_title
+    guild_id = entry.get("guild_id")
     from .discord_api import DiscordError
     try:
         resp = api.edit_channel(thread_id, channel_payload)
-        if "name" in channel_payload:
-            applied_title = (resp or {}).get("name") or desired_title
+        if isinstance(resp, dict):
+            if "name" in channel_payload:
+                applied_title = resp.get("name") or desired_title
+            if resp.get("guild_id"):
+                guild_id = resp["guild_id"]
     except DiscordError as e:
         print(f"thread patch failed: {e}", file=sys.stderr)
         failures.append({"op": "channel_patch", "error": str(e)})
+
+    if title_changed:
+        # forum starter message id == thread id; keep its heading in sync with the title
+        try:
+            api.edit_message(thread_id, thread_id, _starter_content(desired_title), [])
+        except DiscordError as e:
+            print(f"starter patch failed: {e}", file=sys.stderr)
+            failures.append({"op": "starter_patch", "error": str(e)})
 
     if ops:
         _, slot_failures = apply_mod.apply_ops(api, thread_id, ops, state_slots)
         failures.extend(slot_failures)
 
     _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=applied_now, forum_id=forum_id, thread_name=applied_title)
+             forum_tags=applied_now, forum_id=forum_id, thread_name=applied_title,
+             guild_id=guild_id)
     print(f"synced {note_rel} ({len(ops)} ops, {len(failures)} failures)")
     return 0 if not failures else 4
 
 
 def _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
-             forum_tags=None, forum_id=None, thread_name=None):
+             forum_tags=None, forum_id=None, thread_name=None, guild_id=None):
     from .discord_api import DiscordAPI  # noqa: F401
     new_ds = dict(ds)
     new_ds["enabled"] = True
@@ -440,7 +500,12 @@ def _persist(cfg, note_rel, path, fm, ds, body, thread_id, state_slots, slots,
         forum_id = new_ds.get("forum_id") or existing.get("forum_id")
     if thread_name is None:
         thread_name = existing.get("thread_name")
-    entry = {"forum_id": forum_id, "thread_id": str(thread_id)}
+    if guild_id is None:
+        guild_id = existing.get("guild_id")
+    entry = {"forum_id": forum_id}
+    if guild_id is not None:
+        entry["guild_id"] = guild_id
+    entry["thread_id"] = str(thread_id)
     if thread_name is not None:
         entry["thread_name"] = thread_name
     entry["content_hash"] = new_ds["content_hash"]

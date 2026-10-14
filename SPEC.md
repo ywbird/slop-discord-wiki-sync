@@ -1,8 +1,9 @@
-# Discord 동기화 시스템 (wiki -> Discord 포럼) - 구현 스펙 v1.0
+# Discord 동기화 시스템 (wiki -> Discord 포럼) - 구현 스펙 v1.2
 
-- 상태: **설계 확정, 구현 완료(M1~M5, §13.7 태그 포함).** 이 문서는 코딩 에이전트 핸드오프용이다.
+- 상태: **설계 확정, 구현 완료(M1~M5, §13.7 태그, §13.8 제목 포함). v1.2의 §8.1/§8.2는 미구현 과제다.** 이 문서는 코딩 에이전트 핸드오프용이다.
 - 작성: 2026-10-14 (v0.1 -> v1.0 재작성)
 - v1.1 (2026-10-15): **§13.8 제목(스레드 이름) 동기화 추가.** 현재 구현은 게시 시점에만 제목을 넣고 이후에는 갱신하지 않는다(스펙 누락). 이 변경으로 §11.4, §6.2, §15.3, §17.2, §19(O-4)가 함께 갱신된다.
+- v1.2 (2026-10-15): **§8 변환 배선(§8.1) + 위키링크 해석(§8.2) 추가.** 두 가지를 함께 고친다. (1) §7의 2단계(convert)가 구현에서 누락되어 위키링크·콜아웃·형광·수식·각주가 Discord에 원문 그대로 노출된다(프로덕션 포럼 실측: `[[` 45곳/10개 노트). (2) `[[노트]]`를 게시된 포럼 스레드 링크 또는 가든 URL로 치환한다. 함께 갱신: §3, §5.1, §5.2, §6.2, §7, §8, §11.4, §13.1, §15.3, §17.1(U9 확장 + U16·U17), §17.2(12), §18, §19(O-8).
 - 대상 독자: 이 스펙만 읽고 구현할 수 있는 코딩 에이전트. 프로젝트 사전 지식 없음을 가정한다.
 - 요약: LLM 위키 볼트의 마크다운 노트 1개를 Discord 포럼 글 1개로 게시하고, 이후 노트 수정을 **메시지 편집만으로** 반영한다.
 
@@ -63,6 +64,8 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 - 기존 댓글 보존을 위한 마이그레이션. `rebalance`(§12.4)는 최후 수단이며 댓글·딥링크 소실을 감수한다.
 - 위키 노트 본문 자체의 편집(이 시스템은 frontmatter의 `discord_sync` 블록만 쓴다).
 - 모든 마크다운 문법의 완전한 Discord 렌더링. §8의 변환 표가 범위다.
+- 인라인 코드(백틱) 내부의 위키링크·형광 마커 치환. 변환 제외 대상은 `codefence` 블록과 이미지 문법뿐이다(§8.1).
+- 위키링크의 역방향 추적(이 노트를 링크한 노트 목록·백링크 생성). §8.2는 한 방향 해석만 한다.
 
 ---
 
@@ -113,11 +116,15 @@ slop-discord-wiki-sync/
   "defaults": {
     "forum_id": null,
     "forum_tags": [],
+    "guild_id": null,
     "limit": 1900,
     "buffer_policy": { "mode": "adaptive", "min": 2, "max": 10, "ratio": 0.5 },
     "snapshot_attachment": true,
     "callout_mode": "quote",
-    "wiki_link_mode": "text",
+    "wiki_link_mode": "discord",
+    "wiki_link_style": "url",
+    "wiki_link_fallback": "garden",
+    "garden_base_url": "https://llmwiki.meliplug.info",
     "image": {
       "max_bytes": 9500000,
       "max_width": 1600,
@@ -135,6 +142,7 @@ slop-discord-wiki-sync/
 - `defaults.forum_id`가 null이고 노트 frontmatter에도 `forum_id`가 없으면 그 노트는 **건너뛰고 경고**한다(임의 포럼 추측 금지).
 - 게시 위치 우선순위: frontmatter `discord_sync.forum_id` > `config.notes[경로].forum_id` > `defaults.forum_id`. 문서가 자기 게시 위치를 자기 안에 갖는 게 휴대성에 낫다.
 - 태그 우선순위: frontmatter `discord_sync.forum_tags` > `config.notes[경로].forum_tags` > `defaults.forum_tags`. 값은 **Discord 태그 ID 문자열 배열**이다(Obsidian 태그 아님, §13.7).
+- `guild_id` 우선순위(§8.2 점프 링크용): index 노트 항목 > `config.notes[경로]` > `defaults.guild_id`. 같은 길드의 포럼만 쓰면 `defaults.guild_id` 한 줄이면 된다(프로덕션: `761435154588631060`).
 - `limit`은 1900 고정 권장. 올리려면 O-2 실측 후에.
 - `image.max_bytes`는 Discord 기본 한도 10MB보다 낮게 잡아 여유를 둔다.
 
@@ -145,11 +153,16 @@ slop-discord-wiki-sync/
 | `buffer_policy.ratio` | `N = clamp(ceil(K * ratio), min, max)` (§12.1) |
 | `snapshot_attachment` | 꼬리에 전체 .md 첨부 슬롯을 유지할지 |
 | `callout_mode` | `quote`(콜아웃을 인용으로 변환) / `strip`(제거) |
-| `wiki_link_mode` | `text`(링크 텍스트만) / `url`(llmwiki.meliplug.info URL 부착) |
+| `wiki_link_mode` | `text`(표시 텍스트만) / `garden`(가든 URL) / `discord`(게시된 포럼 스레드 링크, 기본). §8.2 |
+| `wiki_link_style` | `discord` 모드의 링크 형식: `url`(`[표시](https://discord.com/channels/{guild_id}/{thread_id})`, 기본) / `mention`(`<#thread_id>`) |
+| `wiki_link_fallback` | `discord` 모드에서 Discord 대상이 없을 때: `garden`(`dg-publish: true`인 노트는 가든 URL, 기본) / `text` |
+| `garden_base_url` | 가든 루트 URL(기본 `https://llmwiki.meliplug.info`). 슬러그 규칙은 §8.2 |
+| `url`(구값) | `garden`의 별칭(하위 호환). 새 설정에는 쓰지 않는다 |
 | `image.one_image_per_slot` | true = 이미지 1장당 슬롯 1개(권장). false = 연속 이미지를 한 슬롯에 최대 10장 |
 | `image.max_width` | 초과 시 축소 재인코딩 |
 | `rate_limit.min_interval_ms` | 요청 사이 최소 간격(전역 직렬 큐) |
 | `forum_tags` | 포럼 글 생성 시 적용할 Discord 태그 ID 배열(§13.7). 최대 5개 |
+| `guild_id` | §8.2 점프 링크 생성용 길드 ID. index에 없을 때의 폴백(§5.1) |
 
 ### 5.3 secrets.json
 
@@ -223,6 +236,7 @@ discord_sync:
 ```
 
 - `thread_name`은 **Discord에 실제로 적용된 스레드 이름**이다(§13.8). 원하는 값은 frontmatter `title`(없으면 파일명 stem)이므로 **[스레드 이름]은 frontmatter 스키마에 추가하지 않는다**(§6.1 스키마 불변). 이 키가 없거나 `null`이면 "적용값 미상"으로 보고 다음 동기화에서 1회 갱신을 시도한다.
+- `guild_id`는 점프 링크(`https://discord.com/channels/{guild_id}/{thread_id}`) 생성에 필요하다(§8.2). 스레드 생성 응답(§13.1)과 상태 보정 `PATCH`/`GET` 응답의 `guild_id`를 저장하며, 요청값이 아니라 응답값을 신뢰한다(§13.8과 같은 규칙). `wiki_link_style=mention`만 쓰면 없어도 동작한다.
 - `slots`는 **스레드 내 실제 순서와 1:1로 일치**해야 한다. `i`는 0부터 연속.
 - `hash`는 §9.5 규칙으로 계산한다. 같으면 그 슬롯은 이번 동기화에서 편집하지 않는다.
 - `attachment_id`는 §13.4의 유지 목록에 필요하다. 단 편집 직전에 API에서 재조회해 복구할 수 있다.
@@ -235,8 +249,9 @@ discord_sync:
 
 ```
 1. read        노트 파일 읽기, frontmatter 분리, NFC 정규화
-2. convert     Obsidian 마크다운 -> Discord 마크다운 (§8)
-3. parse       블록 분해 (§9.1)
+2. parse       블록 분해 (§9.1)  -> blocks
+3. convert     블록별 Obsidian -> Discord 변환 (§8) + 위키링크 해석 (§8.2)
+               (codefence·image 블록은 원문 유지)
 4. chunk       슬롯 계획 생성 (§9.2)  -> plan = [SlotPlan, ...]
 5. diff        plan vs state -> 변경 목록 (§11.2)
 6. apply       Discord API 호출 (생성/편집) (§11.3)
@@ -245,6 +260,9 @@ discord_sync:
 ```
 
 각 단계는 순수 함수로 분리해 M1에서 5까지를 네트워크 없이 테스트 가능하게 만든다.
+
+- **v1.2에서 순서를 바꿨다:** 변환(3)은 블록 분해(2) **뒤**에 온다. 코드펜스·이미지 블록을 변환에서 제외하려면 블록 경계가 먼저 필요하기 때문이다. 길이 계산은 여전히 변환 후 문자열로 한다(§9.4).
+- **3단계는 실제로 호출되어야 한다.** `markdown.convert_obsidian_to_discord()`가 정의만 되고 파이프라인에서 호출되지 않으면 §8 전체가 무효다(§8.1).
 
 ---
 
@@ -255,9 +273,10 @@ Discord는 위키링크·콜아웃·각주·수식을 지원하지 않는다. �
 | 입력 | 출력 | 비고 |
 |---|---|---|
 | YAML frontmatter | (제거) | 본문에 포함하지 않는다 |
-| `[[노트이름]]` | `노트이름` | `wiki_link_mode=url`이면 `노트이름 (https://llmwiki.meliplug.info/<slug>)` |
-| `[[노트이름\|표시]]` | `표시` | 파이프 뒤 텍스트를 쓴다 |
-| `![[파일.png]]` | **이미지 슬롯** | §9.3 |
+| `[[노트이름]]` | 모드별 (§8.2) | 기본 `discord`: 게시된 스레드 링크. 표시 텍스트 = 대상 이름 |
+| `[[노트이름\|표시]]` | 모드별 (§8.2) | 표시 텍스트는 파이프 뒤를 쓴다 |
+| `[[노트이름#헤딩]]` | `[[노트이름]]`과 동일 | 앵커는 버린다(v1) |
+| `![[파일.png]]` | **이미지 슬롯** | §9.3. 위키링크 치환 대상이 **아니다**: `(?<!!)` 필수(§8.1) |
 | `![[파일.png\|300]]` | 이미지 슬롯(크기 무시) | Discord는 크기 지정 미지원 |
 | `![alt](경로.png)` | 이미지 슬롯, alt를 `description`으로 | §9.3 |
 | `> [!note] 제목` + 본문 | `> **제목**` + `> 본문` | `callout_mode=strip`이면 제거 |
@@ -270,8 +289,75 @@ Discord는 위키링크·콜아웃·각주·수식을 지원하지 않는다. �
 | `^[각주]`, `[^1]` | 텍스트로 강등 | 마커 제거 |
 | 이미지가 아닌 첨부 링크 | 텍스트로 유지 | 다운로드 시도 금지 |
 
-- 변환은 **블록 단위로 먼저** 하고, 길이 계산은 변환 **후** 문자열로 한다(변환으로 길이가 변한다).
+- 변환은 **블록 단위로** 한다(코드펜스·이미지 블록은 제외, §8.1). 길이 계산은 변환 **후** 문자열로 한다(변환으로 길이가 변한다).
 - 변환 후 문자열을 NFC 정규화한다(§9.4).
+
+### 8.1 변환 배선 (필수, 현재 미구현)
+
+`markdown.convert_obsidian_to_discord()`는 존재하고 U9도 통과하지만, 실제 파이프라인(`cli._build_slots`)은 `parse_blocks(body)`만 호출한다. 테스트가 함수를 직접 호출해 검증했기 때문에 **배선 누락을 잡지 못했다.** 그 결과 프로덕션 포럼의 게시물에 `[[...]]`(실측 45곳 / 10개 노트), `> [!note] ...`, `==형광==`, `$수식$`, `[^각주]`가 원문 그대로 노출되어 있다(2026-10-15 실측).
+
+- 순서: read -> parse(§9.1) -> convert(§8 + §8.2) -> chunk(§9.2). 변환이 길이를 바꾸므로 청킹 전에 끝나야 한다.
+- 변환은 **텍스트 블록에만** 적용한다. `codefence` 블록과 `image` 블록은 원문을 유지한다(코드 안의 `==x==`·`[[x]]`를 건드리면 U4 불변식이 깨진다).
+- `![[파일.png]]`는 위키링크가 아니다. 치환 정규식에 **negative lookbehind `(?<!!)`를 반드시 붙인다.** 없으면 `![[a.png]]`가 `!a.png`로 깨져 이미지 슬롯(§9.3)이 사라진다.
+- 변환 결과가 빈 문자열이 된 블록(수식만 있던 문단 등)은 계획에서 제외한다. 이때 슬롯 수 K가 줄 수 있으므로 축소 규칙(§10)을 따른다.
+- 회귀 방지: U9는 `convert_obsidian_to_discord()`를 직접 부르지 말고 **`_build_slots()`를 경유**해 검증한다.
+- 첫 배포 효과: 게시된 12개 노트의 본문이 바뀌므로 다음 `sync --all`에서 전부 1회 편집된다(정상). 편집은 슬롯 단위 PATCH이며 아카이브/재게시가 아니다(댓글 보존).
+
+### 8.2 위키링크 해석 (가든 / Discord 링크 치환)
+
+`[[노트]]`는 볼트 노트를 가리키는데 Discord는 위키링크를 모른다. 볼트 노트는 이미 가든(llmwiki.meliplug.info)과 Discord 포럼 양쪽에 게시되어 있으므로, 링크 대상을 **게시된 스레드 링크**로 바꾼다(2026-10-15 도이 요구).
+
+**문법**
+
+| 입력 | 처리 |
+|---|---|
+| `[[대상]]` | 대상 해석 후 치환. 표시 텍스트 = 대상 이름 |
+| `[[대상\|표시]]` | 표시 텍스트 = 파이프 뒤 |
+| `[[대상#헤딩]]`, `[[대상#헤딩\|표시]]` | `#` 뒤 앵커는 버린다(v1) |
+| `![[...]]` | 대상 아님(임베드, §9.3) |
+
+**모드별 출력** (`wiki_link_mode`)
+
+| 모드 | 출력 |
+|---|---|
+| `text` | 표시 텍스트만 |
+| `garden` | `[표시]({garden_base_url}/{slug})` |
+| `discord` (기본) | 아래 사다리 |
+
+**`discord` 모드의 해석 사다리** (위에서 먼저 맞는 것 하나)
+
+1. **index.json에 대상 노트 항목이 있고 `thread_id`가 있으면 -> Discord 링크**
+   - `wiki_link_style=url`(기본): `[표시](https://discord.com/channels/{guild_id}/{thread_id})`
+   - `wiki_link_style=mention`: `<#thread_id>`
+   - `guild_id`는 **index 노트 항목 > `config.notes[경로].guild_id` > `defaults.guild_id`** 순으로 찾는다. `url` 스타일인데 셋 다 없으면 링크를 만들 수 없으므로 2번으로 내려간다(경고 1줄). `mention` 스타일은 `guild_id`가 필요 없다.
+2. **`wiki_link_fallback=garden`(기본)이고 대상 노트 frontmatter에 `dg-publish: true`가 있으면 -> 가든 URL**
+3. **그 외 -> 표시 텍스트만** (경고에 대상 이름을 모은다)
+
+**slug 규칙** (`garden` 모드 · 사다리 2번 공통)
+
+- frontmatter `dg-permalink` > 파일명 stem(소문자, 공백 -> `-`).
+- 한글 파일명 노트는 가든에서 `dg-permalink`가 필수다(슬러그가 비면 11ty `DuplicatePermalinkOutputError`). permalink가 없고 stem이 ASCII가 아니면 slug를 만들지 말고 3번으로 내려간다(경고).
+- 실측 확인(2026-10-15): `/ficciones`, `/read-books`, `/kyu-of-babel`, `/jorge-luis-borges` 전부 200.
+
+**대상 -> 노트 찾기** (순서 고정, 결정적)
+
+1. index.json 키와 정확히 일치(`대상`, `대상.md`)
+2. 볼트에서 상대경로 stem 일치
+3. 여러 개면 모호 -> 경고 후 3번(표시 텍스트만)
+
+**결정성 · 무변경**
+
+- 해석은 **index.json + 볼트 frontmatter만** 본다. HTTP 호출 0회 -> `--dry-run` 불변식(§15.1) 유지.
+- 볼트 노트의 **본문은 읽지 않는다**(frontmatter만). 링크 순환·재귀 없음.
+- 해석 결과가 달라지면 슬롯 본문이 달라져 해시도 달라진다(§9.5) -> 다음 동기화에서 그 슬롯이 1회 편집된다. **루프가 아니다**(해석이 state·볼트에만 의존하므로 수렴한다).
+- 새 노트를 게시한 뒤 그 노트를 참조하던 기존 노트를 링크화하려면 `sync --all`을 한 번 돌린다. `rebalance`로 `thread_id`가 바뀐 경우도 같다.
+- 미해석 링크는 **오류가 아니다.** 실패 집계(exit 4)에 넣지 않고 경고만 출력한다.
+
+**길이 · 렌더링**
+
+- 점프 URL 1개 ≈ 65자(UTF-16). 링크가 많으면 슬롯이 늘 수 있다(늘리는 건 안전, 줄이는 건 §10).
+- `[표시](...)`와 `<#thread_id>` 둘 다 Discord에서 클릭 가능한 링크로 렌더된다. 멘션은 권한 없는 사용자에게 `#deleted-channel`로 보일 수 있고 표시 텍스트가 스레드 이름으로 고정된다 -> 기본값은 `url` 스타일(O-8로 실측 확정).
+- 점프 링크는 임베드를 만들지 않는다. 콘텐츠 슬롯에는 이미 `SUPPRESS_EMBEDS`가 있으므로(§13.6) 미리보기도 없다. 편집 경로는 `flags`를 보내지 않으므로 기존 플래그가 유지된다(§13.4).
 
 ---
 
@@ -431,6 +517,8 @@ def diff(plan, state):
 ```
 
 - 무변경 판정은 세 축을 모두 본다: 슬롯 ops가 비어 있고, 태그 집합이 같고, 제목이 state.thread_name과 같을 때만 `no-op`(HTTP 0회).
+- 위키링크 해석(§8.2)은 **계획 생성 시점에 이미 끝나 있다**(index.json + 볼트 frontmatter만 참조). 동기화 경로에서 링크 해석을 위해 추가 HTTP를 호출하지 않는다.
+- 새 노트를 게시한 뒤에는 `sync --all`을 한 번 돌려 그 노트를 참조하는 기존 노트를 링크화한다(참조 노트당 1회 편집).
 
 ### 11.5 불변식 (테스트로 강제할 것)
 
@@ -499,7 +587,7 @@ POST /channels/{forum_id}/threads
   "applied_tags": ["<tag_id>", ...],         // 선택, §13.7 (최대 5개, available_tags 검증)
   "flags": 4096                               // SUPPRESS_NOTIFICATIONS
 }
--> 201 { "id": <thread_id>, "owner_id": ..., ... }
+-> 201 { "id": <thread_id>, "guild_id": <guild_id>, "name": <적용된 제목>, "parent_id": <forum_id>, ... }
 ```
 
 스타터 메시지 내용(권장 포맷):
@@ -518,7 +606,8 @@ POST /channels/{forum_id}/threads
 - 목차 딥링크는 슬롯 메시지 ID가 필요하므로 **최초 게시 시에는"(동기화 후 갱신)"으로 두고, 다음 동기화에서 채운다.**
 - 스타터는 `state.starter_id`로 별도 관리한다(`slots`에 넣지 않는다).
 - **제목(스레드 이름) 동기화는 §13.8이 단일 소스다.** 생성 시에는 위 `name`이 그대로 스레드 이름이 되고, 이후 변경은 §13.8로 반영한다.
-- **범위 밖(미구현, 별도 과제):** 스타터 본문의 `# <제목>` 줄과 목차 딥링크 채우기는 어떤 마일스톤에도 구현되어 있지 않다(M5까지 완료 후에도 미구현). §13.8은 스레드 이름만 다룬다.
+- **`guild_id`는 생성 응답에서 받아 index.json에 저장한다**(§6.2). §8.2의 점프 링크에 필요하다.
+- **범위 밖(미구현, 별도 과제):** 목차 딥링크(`## 목차` 항목) 채우기는 미구현이다. 스타터 본문의 `# <제목>` 줄은 §13.8 제목 동기화에 포함되어 구현되어 있다(v1.2 시점 코드 실측).
 
 ### 13.2 스레드 상태 보정 (매 동기화 시작 시)
 
@@ -693,6 +782,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
   "content_hash": "sha256:...",
   "limit": 1900,
   "thread_name": { "desired": "UBL", "applied": "UBL", "action": "noop" },
+  "wiki_links": { "discord": 2, "garden": 0, "text": 0, "unresolved": [] },
   "plan": [
     { "i": 0, "role": "content", "chars": 812, "preview": "# UBL\nUBL은 ...", "hash": "sha256:c1" },
     { "i": 1, "role": "image", "src": "raw/images/foo.png", "filename": "foo.png",
@@ -712,6 +802,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 
 - `thread_name.action`은 `noop` 또는 `patch`다. `applied`는 `index.json`의 저장값이며, 없으면 `null`로 출력한다(이 경우 `action=patch`).
 - 사람이 읽는 출력에는 제목 한 줄을 추가한다: `제목: "UBL" (noop)` / 제목이 바뀌면 `제목: "UBL" -> "UBL 개요" (PATCH)`. **dry-run은 이 판단 때문에도 네트워크를 호출하지 않는다**(저장값과만 비교).
+- `wiki_links`는 §8.2의 해석 결과 요약이다. `discord`/`garden`/`text`는 치환 개수, `unresolved`는 표시 텍스트로 떨어진 대상 이름 목록이다. 사람이 읽는 출력 한 줄: `링크: 2개 (discord 2, garden 0, text 0)`. **해석도 HTTP 0회다**(§8.2).
 
 ---
 
@@ -760,13 +851,15 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | U6 | 이미지 단독 / 문단 중간 / 문서 맨 앞 / 연속 2장 | 각각 기대 슬롯 배치(§9.3) |
 | U7 | NFD 한글 노트 | NFC 정규화 후 길이 정확 |
 | U8 | 아스트랄 이모지 | UTF-16 2유닛으로 계산 |
-| U9 | `[[링크]]` / 콜아웃 / `==형광==` | §8 표대로 변환 |
+| U9 | `[[링크]]` / 콜아웃 / `==형광==` / `$수식$` / `[^각주]` | §8 표대로 변환. **`_build_slots()`를 경유해 검증한다**(함수 직접 호출 금지 — 배선 누락을 잡기 위함, §8.1) |
 | U10 | diff: 축소 + 역할 전환 | RevertToBuffer 포함, 삭제없음 |
 | U11 | 버퍼 정책 K=2,12,20,30 | N=2,6,10,10 |
 | U12 | 결정성 | 같은 입력 2회 -> 동일 계획·동일 해시 |
 | U13 | 태그 해석 우선순위 | frontmatter > notes > defaults, 없으면 빈 배열 |
 | U14 | 태그 검증 | 5개 초과 -> exit 2, 미등록 ID -> 경고 후 제외(네트워크 없이 mock) |
 | U15 | 제목 해석/비교 (§13.8) | `title` 없으면 stem 폴백, 100자 초과 시 100자 절단, `thread_name`과 같으면 `action=noop`, 다르거나 `null`이면 `action=patch` (네트워크 없음) |
+| U16 | 위키링크 해석 사다리 (§8.2) | index에 대상 있고 `thread_id`+`guild_id` 있음 -> 점프 URL / `mention` 스타일 -> `<#id>` / index에 있는데 `guild_id` 없음(url) -> 폴백 / index에 없고 `dg-publish: true` -> 가든 URL(`dg-permalink` 우선, 없으면 stem slug) / 둘 다 없음 -> 표시 텍스트 / 한글 stem + permalink 없음 -> 표시 텍스트 + 경고 / 모호한 대상 -> 경고 / `\|표시`·`#헤딩` 처리 / 2회 실행 결과 동일(결정성). 네트워크 없음 |
+| U17 | 문법 엣지 (블록 변환) | `![[파일.png]]`가 `!파일.png`로 깨지지 않음(lookbehind) / 코드펜스 안의 `[[x]]`·`==y==`·`$z$` 미변환 / 변환 후 빈 블록은 계획에서 제외 / 변환으로 길이가 변한 문단의 chars 정확 |
 
 ### 17.2 통합 테스트 (M2 이후, 테스트 포럼 필요)
 
@@ -783,6 +876,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 9. 댓글을 1개 단 후 7번 반복 -> 문서 상단 순서 불변
 10. 태그 지정 후 게시 -> 스레드에 태그가 붙음. 태그 변경 후 재동기화 -> PATCH로 갱신됨
 11. 제목 변경 후 재동기화 -> PATCH 1회로 스레드 이름이 바뀌고, index의 `thread_name`이 갱신되며 exit 0 (즉시 재실행 시 HTTP 0회). 제목을 되돌리면 다시 PATCH 1회
+12. 위키링크가 있는 노트를 게시 -> 실제 메시지에 점프 링크가 들어가고 클라이언트에서 클릭 가능, 임베드 없음. **대상 노트가 미게시 상태면 표시 텍스트로 나가고, 대상 게시 후 `sync --all` 한 번으로 1회 편집돼 링크로 바뀌며, 그 다음 실행은 HTTP 0회(no-op)**
 
 ---
 
@@ -791,9 +885,9 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | 단계 | 범위 | 수용 기준 |
 |---|---|---|
 | M0 | §19 확인 3건 | O-1~O-3 결과를 SPEC에 기록 |
-| M1 | 설정/볼트 읽기/변환/청킹/diff + `--dry-run` | U1~U15 전부 통과, HTTP 호출 0회, `--dry-run --json` 스키마 준수 |
+| M1 | 설정/볼트 읽기/변환/청킹/diff + `--dry-run` | U1~U17 전부 통과, HTTP 호출 0회, `--dry-run --json` 스키마 준수 |
 | M2 | 게시 (스레드 + 슬롯 + 버퍼 + 스냅샷 + 태그) | 통합 1, 2, 10 통과. 실패 시에도 state가 일관 |
-| M3 | 동기화 (diff + 편집 + 버퍼 소비/반환 + 제목 동기화 §13.8) | 통합 3~5, 7, 8, 11 통과 |
+| M3 | 동기화 (diff + 편집 + 버퍼 소비/반환 + 제목 동기화 §13.8 + 위키링크 §8.2) | 통합 3~5, 7, 8, 11, 12 통과 |
 | M4 | 이미지 파이프라인 (해석/정규화/alt/폴백) | 통합 4, 6, 9 통과 + 업로드 실패 폴백 동작 |
 | M5 | 복구/운영 (`adopt`, `doctor`, `verify`, 락, 로그, rebalance) | `doctor`가 의도적 손상 state를 탐지, `adopt`로 복구 |
 
@@ -816,6 +910,7 @@ sync.py doctor --tags <forum_id>               # 포럼의 available_tags(id/nam
 | O-5 | 실제 볼트 이미지의 크기 분포(10MB 초과 비율, 평균 폭) | 볼트 이미지 대상으로 `du`/`identify` | 10MB 초과가 많으면 Pillow 도입 확정 |
 | O-6 | `hidden` 상태 스레드에 대한 GET/PATCH 동작 | 아카이브/숨김 스레드에 시도 | 실패 시 가드 강화 |
 | O-7 | `POST threads`에 `applied_tags`를 실어 태그가 실제로 붙는가 / 5개 초과·미등록 ID 시 응답 | 테스트 포럼에서 태그 1~2개로 생성, 초과·미등록도 시도 | 초과·미등록이 400이면 §13.7 검증을 필수로 유지 |
+| O-8 | §8.2의 링크 표현이 실제 클라이언트에서 동작하는가 | 실제 포럼 메시지에 `[표시](https://discord.com/channels/{guild}/{thread})`와 `<#thread_id>`를 각각 넣고 확인 | 점프 링크가 안 열리거나 임베드가 뜨면 `wiki_link_style` 기본값·`SUPPRESS_EMBEDS` 처리를 수정한다. `mention`이 `#deleted-channel`로 보이면 `url` 스타일만 쓴다 |
 
 - 해결된 항목은 지우지 말고 "확정: ..."으로 남긴다.
 - 이미 확정된 사실: C-1~C-6(§2).

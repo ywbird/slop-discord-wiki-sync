@@ -22,6 +22,8 @@ Before coding, verify **O-1–O-7** in §19 against a test forum and record resu
 - Workflow rule from 도이: when asked to publish a note without naming a target, upload to **both** the Digital Garden and this Discord forum.
 
 ## Implementation order
+Current work order: `HANDOFF-2026-10-15-wiki-links.md` (SPEC v1.2 §8.1 conversion wiring + §8.2 wiki link resolution).
+
 M1 (pure, no network) → M2 (publish) → M3 (sync) → M4 (images) → M5 (ops). `--dry-run` must make **0 HTTP calls** (enforce via HTTP layer counter).
 
 ## Core rules (easy to miss)
@@ -34,6 +36,8 @@ M1 (pure, no network) → M2 (publish) → M3 (sync) → M4 (images) → M5 (ops
 - **Forum tags**: on create, send `applied_tags` (IDs from frontmatter `discord_sync.forum_tags` > `config.notes[...]` > `defaults.forum_tags`). Validate against the forum's `available_tags`, max 5, drop unknown with a warning. See SPEC §13.7.
 - **Thread title sync (§13.8)**: desired = frontmatter `title` else filename stem, truncated to 100 code points. Applied = `index.json` `thread_name` (never frontmatter). Merge `name` into the §13.2 state PATCH only when it differs; store the PATCH/GET response `name` (not the request value). No-op only when slots + tags + title are all unchanged (0 HTTP).
 - **Atomic writes**: write temp + `os.replace` for `index.json`. Keep YAML frontmatter intact (2-space indent), preserve other keys.
+- **Wire the conversion (§8.1)**: `convert_obsidian_to_discord()` must actually be called — `read -> parse -> convert -> chunk`, text blocks only (codefence/image blocks stay raw). `![[file.png]]` needs a `(?<!!)` lookbehind or image slots break. Tests must go through `_build_slots()`, not the converter directly.
+- **Wiki link resolution (§8.2)**: `[[note]]` -> published thread jump link (`[text](https://discord.com/channels/{guild}/{thread})`, default) else garden URL (`dg-publish: true`, slug = `dg-permalink` > stem) else plain display text. Resolution reads `index.json` + vault frontmatter only (0 HTTP, keeps `--dry-run` invariant). `guild_id` from index > `config.notes[...]` > `defaults.guild_id`. Unresolved links = warning, not failure.
 
 ## Module layout
 `sync.py` is the entry. Modules: `config`, `vault` (read/frontmatter, NFC), `markdown` (Obsidian→Discord §8), `chunker` (§9), `state` (index.json+frontmatter), `discord_api` (serialized queue + 350ms min + 429/retry), `images` (§14), `apply` (§11), `cli`.

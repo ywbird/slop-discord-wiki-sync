@@ -79,12 +79,30 @@ def u8_astral_emoji():
 
 
 def u9_conversions():
-    out = markdown.convert_obsidian_to_discord("[[Note]] [[Note|show]]")
-    assert out == "Note show"
-    out = markdown.convert_obsidian_to_discord("> [!note] Title\n> body")
-    assert "> **Title**" in out and "> body" in out
-    out = markdown.convert_obsidian_to_discord("==hl==")
-    assert out == "hl"
+    import tempfile
+    from sync import cli
+
+    d = tempfile.mkdtemp()
+    note = os.path.join(d, "n.md")
+    body = ("[[Note]] [[Note|show]]\n\n"
+            "> [!note] Title\n> body\n\n"
+            "==hl==\n\n"
+            "inline $x$ math\n\n"
+            "footnote[^1]\n")
+    text = "---\ntitle: N\n---\n\n" + body
+    with open(note, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    cfg = {"vault_root": d, "defaults": {"limit": 1900}}
+    slots, _, stats = cli._build_slots(note, cfg, text, body)
+    joined = "\n".join(s.content for s in slots)
+    assert "[[" not in joined, joined
+    assert "> **Title**" in joined and "> body" in joined
+    assert "==hl==" not in joined and "hl" in joined
+    assert "$x$" not in joined
+    assert "[^1]" not in joined
+    assert "Note" in joined and "show" in joined
+    assert stats["text"] >= 2  # both unresolved wiki links fell back to text
 
 
 def u10_diff_shrink_role_change():
@@ -207,8 +225,8 @@ def u15_snapshot_hash_stable_across_persist():
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
     try:
-        s1, _ = cli._build_slots(path, cfg, text1, body)
-        s2, _ = cli._build_slots(path, cfg, text2, body)
+        s1, _, _ = cli._build_slots(path, cfg, text1, body)
+        s2, _, _ = cli._build_slots(path, cfg, text2, body)
         h1 = apply_mod.plan_content_hash(s1)
         h2 = apply_mod.plan_content_hash(s2)
         assert h1 == h2, "frontmatter churn must not change plan hash (no-op must hold)"
@@ -435,7 +453,7 @@ def u19_thread_title_sync():
                 "defaults": {"forum_id": "F1", "limit": 1900}},
                open(cfg_path, "w"))
 
-    state = {"constructed": 0, "name_patches": []}
+    state = {"constructed": 0, "name_patches": [], "starter_patches": []}
 
     class Fake:
         def __init__(self, *a, **k):
@@ -456,6 +474,7 @@ def u19_thread_title_sync():
             return {"name": payload.get("name", "T1")}
 
         def edit_message(self, ch, mid, c, att, files=None, flags=None):
+            state["starter_patches"].append(c)
             return {"id": mid, "attachments": []}
 
         def get_message(self, ch, mid):
@@ -483,6 +502,7 @@ def u19_thread_title_sync():
             rc = cli.main(["sync", "pages/ttl.md", "--config", cfg_path])
         assert rc == 0
         assert state["name_patches"] == ["UBL 개요"], state
+        assert state["starter_patches"] == ["# UBL 개요\n\n-# 마지막 동기화: (게시 직후)\n"], state
         assert state_mod.load_index(idx)["notes"]["pages/ttl.md"]["thread_name"] == "UBL 개요"
 
         # immediate rerun -> 0 HTTP (no DiscordAPI constructed)
@@ -498,6 +518,10 @@ def u19_thread_title_sync():
         with contextlib.redirect_stdout(io.StringIO()):
             cli.main(["sync", "pages/ttl.md", "--config", cfg_path])
         assert state["name_patches"] == ["UBL 개요", "UBL"]
+        assert state["starter_patches"] == [
+            "# UBL 개요\n\n-# 마지막 동기화: (게시 직후)\n",
+            "# UBL\n\n-# 마지막 동기화: (게시 직후)\n",
+        ], state
 
         # dry-run compares against stored thread_name only (0 HTTP), reports action
         buf = io.StringIO()
@@ -507,8 +531,101 @@ def u19_thread_title_sync():
         assert rc == 0 and state["constructed"] == before
         out = _json.loads(buf.getvalue())
         assert out["thread_name"] == {"desired": "UBL", "applied": "UBL", "action": "noop"}
+        assert out["wiki_links"] == {"discord": 0, "garden": 0, "text": 0, "unresolved": []}
     finally:
         discord_api.DiscordAPI = original
+
+
+def u20_wiki_link_ladder():
+    from sync import cli
+    from sync import markdown as md
+
+    fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "fixtures", "wiki")
+    index = {"notes": {
+        "pages/target.md": {"thread_id": "T1", "guild_id": "G1"},
+        "pages/noguild.md": {"thread_id": "T2"},
+        "pages/rent.md": {"thread_id": "T3"},
+    }}
+    cfg = {
+        "vault_root": fixtures,
+        "defaults": {"wiki_link_mode": "discord", "wiki_link_style": "url",
+                     "wiki_link_fallback": "garden", "garden_base_url": "https://g"},
+        "notes": {"pages/rent.md": {"guild_id": "GN"}},
+    }
+    ctx = cli._wiki_link_ctx(cfg, index)
+
+    def conv(txt, **over):
+        c = dict(ctx)
+        c.update(over)
+        stats = md.new_wiki_stats()
+        return md.convert_obsidian_to_discord(txt, {}, c, stats), stats
+
+    out, st = conv("[[target]]")
+    assert out == "[target](https://discord.com/channels/G1/T1)", out
+    assert st["discord"] == 1
+
+    out, st = conv("[[target|보기]]")
+    assert out == "[보기](https://discord.com/channels/G1/T1)", out
+
+    out, st = conv("[[target#헤딩]]")
+    assert out == "[target](https://discord.com/channels/G1/T1)", out
+
+    out, st = conv("[[target]]", style="mention")
+    assert out == "<#T1>", out
+
+    out, st = conv("[[rent]]")
+    assert out == "[rent](https://discord.com/channels/GN/T3)", out
+
+    out, st = conv("[[noguild]]")
+    assert out == "noguild" and st["text"] == 1
+    assert any("guild_id" in w for w in st["warnings"])
+
+    out, st = conv("[[garden]]")
+    assert out == "[garden](https://g/garden-path)", out and st["garden"] == 1
+
+    out, st = conv("[[ascii]]")
+    assert out == "[ascii](https://g/ascii)", out
+
+    out, st = conv("[[한글]]")
+    assert out == "한글" and st["text"] == 1
+
+    out, st = conv("[[dup]]")
+    assert out == "dup" and any("ambiguous" in w for w in st["warnings"])
+
+    out, st = conv("[[garden]]", mode="garden")
+    assert out == "[garden](https://g/garden-path)", out
+
+    out, st = conv("[[target|보기]]", mode="text")
+    assert out == "보기" and st["text"] == 1
+
+    out, st = conv("[[noguild]]", defaults_guild_id="GD")
+    assert out == "[noguild](https://discord.com/channels/GD/T2)", out
+
+    a, _ = conv("[[target]] [[garden]] [[noguild]]")
+    b, _ = conv("[[target]] [[garden]] [[noguild]]")
+    assert a == b
+
+
+def u21_wiki_syntax_edges():
+    from sync import markdown as md
+
+    stats = md.new_wiki_stats()
+    out = md.convert_obsidian_to_discord("![[img.png]] [[target]]", {}, None, stats)
+    assert out == "![[img.png]] target", out
+    assert stats["text"] == 1
+
+    stats = md.new_wiki_stats()
+    out = md.convert_obsidian_to_discord("text $a$ and $$b$$ and ==hl==", {}, None, stats)
+    assert "$" not in out and "==" not in out and "text" in out, out
+
+    stats = md.new_wiki_stats()
+    out = md.convert_obsidian_to_discord("보기[^1] 끝", {}, None, stats)
+    assert "[^1]" not in out, out
+
+    stats = md.new_wiki_stats()
+    out = md.convert_obsidian_to_discord("> [!note] 제목\n> 본문", {}, None, stats)
+    assert "> **제목**" in out and "> 본문" in out, out
 
 
 def main():
