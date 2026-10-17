@@ -4,7 +4,7 @@
 
 Publish an Obsidian vault note as a **Discord forum thread**, then keep it in sync by **editing messages only** - so comments and deep links survive every update.
 
-- No server, no daemon. A single script (`sync.py`) plus `sync/` modules, standard library only.
+- No server, no daemon. A single script (`sync.py`) plus `sync/` modules; the only third-party dependency is PyYAML.
 - One-way sync: vault -> Discord. Edits made on the Discord side are overwritten on the next sync.
 - `--dry-run` guarantees **zero HTTP calls** (enforced by a counter in the HTTP layer).
 
@@ -39,7 +39,8 @@ The fix:
 ## Requirements
 
 - Python 3.11+ (developed and verified on Artix Linux, Python 3.14.7)
-- No third-party packages - standard library only
+- [uv](https://docs.astral.sh/uv/) (recommended) or a plain `python3`
+- PyYAML - the only third-party dependency (`uv sync` installs it)
 - A Discord bot token. The bot is assumed to hold the **Administrator** role in the target guild (channel permission checks are skipped; unarchive/unlock/tags/rename all work).
 
 ---
@@ -49,7 +50,14 @@ The fix:
 ```bash
 git clone <repo-url> slop-discord-wiki-sync
 cd slop-discord-wiki-sync
+uv sync                              # creates .venv and installs PyYAML
 cp config.example.json config.json   # fill in your values
+```
+
+Without uv, install the dependency yourself and call `python3 sync.py` instead of `uv run sync.py`:
+
+```bash
+python3 -m pip install pyyaml
 ```
 
 Provide the token one of two ways:
@@ -111,15 +119,15 @@ discord_sync:
 ## Usage
 
 ```bash
-python3 sync.py publish <note> [--force]              # publish a new thread
-python3 sync.py sync <note> [--dry-run] [--diff]      # apply changes
-python3 sync.py sync --all [--dry-run]                # every enabled note
-python3 sync.py status <note>                         # print plan vs. state diff
-python3 sync.py verify <note>                         # GET the live thread and compare with state
-python3 sync.py adopt <note> --post-id <id> [--starter-id <id>]   # re-adopt an existing thread
-python3 sync.py rebalance <note> --yes                # repost as a new thread (loses comments/deep links)
-python3 sync.py doctor                                # check token/vault/modules
-python3 sync.py doctor --tags <forum_id>              # print the forum's available_tags
+uv run sync.py publish <note> [--force]              # publish a new thread
+uv run sync.py sync <note> [--dry-run] [--diff]      # apply changes
+uv run sync.py sync --all [--dry-run]                # every enabled note
+uv run sync.py status <note>                         # print plan vs. state diff
+uv run sync.py verify <note>                         # GET the live thread and compare with state
+uv run sync.py adopt <note> --post-id <id> [--starter-id <id>]   # re-adopt an existing thread
+uv run sync.py rebalance <note> --yes                # repost as a new thread (loses comments/deep links)
+uv run sync.py doctor                                # check token/vault/modules
+uv run sync.py doctor --tags <forum_id>              # print the forum's available_tags
 ```
 
 Common options: `--config <path>` (default `./config.json`), `--json` (machine-readable output), `--verbose`.
@@ -130,13 +138,13 @@ Examples:
 
 ```bash
 # Preview changes only (no network calls)
-python3 sync.py sync "UBL.md" --dry-run --diff
+uv run sync.py sync "UBL.md" --dry-run --diff
 
 # Apply
-python3 sync.py sync "UBL.md"
+uv run sync.py sync "UBL.md"
 
 # Sync the whole vault
-python3 sync.py sync --all
+uv run sync.py sync --all
 ```
 
 ### Exit codes
@@ -185,7 +193,7 @@ Conversion applies to **text blocks only**. `![[...]]` is an image embed, so it 
 ## Tests
 
 ```bash
-python3 -m tests.test_m1     # 24/24 passed (no pytest needed)
+uv run python -m tests.test_m1     # 24/24 passed (no pytest needed)
 ```
 
 The M1 unit tests run without network access. They cover boundary splits, code fence atomicity, NFD->NFC length, emoji (surrogate pairs), wiki-link/callout conversion, buffer policy, determinism, tag priority and validation, and the zero-HTTP `--dry-run` invariant.
@@ -216,6 +224,8 @@ slop-discord-wiki-sync/
   SPEC.md              # single source of design (full spec)
   AGENTS.md            # working rules for coding agents
   config.example.json  # example config
+  pyproject.toml       # project metadata + PyYAML dependency (uv)
+  uv.lock              # locked dependency versions
   LICENSE              # VibeCoded AI-Slop License v1.0
 ```
 

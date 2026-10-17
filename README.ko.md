@@ -4,7 +4,7 @@
 
 Obsidian 위키 볼트의 마크다운 노트 1개를 **Discord 포럼 글 1개**로 게시하고, 이후 노트 수정을 **메시지 편집만으로** 반영하는 단일 CLI 도구.
 
-- 서버·데몬 없음. 단독 스크립트(`sync.py`) + 표준 라이브러리만 사용.
+- 서버·데몬 없음. 단독 스크립트(`sync.py`) + `sync/` 모듈. 서드파티 의존성은 PyYAML 하나뿐.
 - 단방향 동기화: 위키 -> Discord. Discord 쪽 수정은 다음 동기화에서 덮인다.
 - `--dry-run`은 **HTTP 호출 0회**를 보장한다(테스트로 강제).
 
@@ -39,7 +39,8 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 ## 요구사항
 
 - Python 3.11+ (개발·검증 환경: Artix Linux, Python 3.14.7)
-- 외부 패키지 없음 - 표준 라이브러리만 사용
+- [uv](https://docs.astral.sh/uv/) (권장) 또는 일반 `python3`
+- PyYAML - 유일한 서드파티 의존성(`uv sync`가 설치한다)
 - Discord 봇 토큰. 봇은 대상 서버에서 **관리자 역할**을 갖는 것을 전제로 한다(채널 권한 체크 생략, unarchive/unlock/태그/이름 변경 가능).
 
 ---
@@ -49,7 +50,14 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 ```bash
 git clone <repo-url> slop-discord-wiki-sync
 cd slop-discord-wiki-sync
+uv sync                              # .venv 생성 + PyYAML 설치
 cp config.example.json config.json   # 값 채우기
+```
+
+uv를 안 쓴다면 의존성을 직접 설치하고, `uv run sync.py` 대신 `python3 sync.py`로 실행한다.
+
+```bash
+python3 -m pip install pyyaml
 ```
 
 토큰은 둘 중 하나로 준다.
@@ -111,15 +119,15 @@ discord_sync:
 ## 사용법
 
 ```bash
-python3 sync.py publish <note> [--force]              # 신규 게시
-python3 sync.py sync <note> [--dry-run] [--diff]      # 변경 반영
-python3 sync.py sync --all [--dry-run]                # enabled 노트 전체
-python3 sync.py status <note>                         # 계획과 상태의 차이만 출력
-python3 sync.py verify <note>                         # GET으로 실제 스레드와 state 대조
-python3 sync.py adopt <note> --post-id <id> [--starter-id <id>]   # 기존 글 재입양
-python3 sync.py rebalance <note> --yes                # 새 스레드로 재게시(댓글·딥링크 소실)
-python3 sync.py doctor                                # 토큰/볼트/모듈 점검
-python3 sync.py doctor --tags <forum_id>              # 포럼의 available_tags 출력
+uv run sync.py publish <note> [--force]              # 신규 게시
+uv run sync.py sync <note> [--dry-run] [--diff]      # 변경 반영
+uv run sync.py sync --all [--dry-run]                # enabled 노트 전체
+uv run sync.py status <note>                         # 계획과 상태의 차이만 출력
+uv run sync.py verify <note>                         # GET으로 실제 스레드와 state 대조
+uv run sync.py adopt <note> --post-id <id> [--starter-id <id>]   # 기존 글 재입양
+uv run sync.py rebalance <note> --yes                # 새 스레드로 재게시(댓글·딥링크 소실)
+uv run sync.py doctor                                # 토큰/볼트/모듈 점검
+uv run sync.py doctor --tags <forum_id>              # 포럼의 available_tags 출력
 ```
 
 공통 옵션: `--config <path>`(기본 `./config.json`), `--json`(기계 판독 출력), `--verbose`.
@@ -130,13 +138,13 @@ python3 sync.py doctor --tags <forum_id>              # 포럼의 available_tags
 
 ```bash
 # 변경 사항만 확인 (네트워크 호출 없음)
-python3 sync.py sync "UBL.md" --dry-run --diff
+uv run sync.py sync "UBL.md" --dry-run --diff
 
 # 실제 반영
-python3 sync.py sync "UBL.md"
+uv run sync.py sync "UBL.md"
 
 # 볼트 전체 동기화
-python3 sync.py sync --all
+uv run sync.py sync --all
 ```
 
 ### 종료 코드
@@ -185,7 +193,7 @@ read -> parse(블록 분해) -> convert(Obsidian->Discord) -> chunk(슬롯 계�
 ## 테스트
 
 ```bash
-python3 -m tests.test_m1     # 24/24 passed (pytest 불필요)
+uv run python -m tests.test_m1     # 24/24 passed (pytest 불필요)
 ```
 
 M1 단위 테스트는 네트워크 없이 돈다. 경계 분할, 코드펜스 원자성, NFD->NFC 길이, 이모지(서로게이트 페어), 위키링크/콜아웃 변환, 버퍼 정책, 결정성, 태그 우선순위·검증, `--dry-run` HTTP 0회를 검증한다.
@@ -216,6 +224,8 @@ slop-discord-wiki-sync/
   SPEC.md              # 설계 단일 소스(전체 스펙)
   AGENTS.md            # 에이전트 작업 규칙
   config.example.json  # 설정 예시
+  pyproject.toml       # 프로젝트 메타데이터 + PyYAML 의존성 (uv)
+  uv.lock              # 의존성 버전 고정
   LICENSE              # VibeCoded AI-Slop License v1.0
 ```
 

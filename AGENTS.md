@@ -6,6 +6,9 @@ Discord wiki→forum sync (Obsidian markdown → Discord forum). Single-file CLI
 ## Working directory
 Fixed per SPEC: `<repo-root>/` (repo root = runtime cwd).
 
+## Toolchain (uv)
+Run everything through uv: `uv run sync.py <cmd> ...`, `uv run python -m tests.test_m1`. PyYAML is the only third-party dependency and is declared in `pyproject.toml` (`uv sync` installs it; `uv.lock` is committed). `[tool.uv] package = false` - the repo is a script, not an installable package.
+
 ## M0 first (blocking)
 Before coding, verify **O-1–O-7** in §19 against a test forum and record results in SPEC.md:
 - O-1: can send `flags` on PATCH? If no, apply only on create.

@@ -11,3 +11,4 @@ logs/
 # 파이썬
 __pycache__/
 *.pyc
+.venv/
