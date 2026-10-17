@@ -4,7 +4,7 @@
 Discord wiki→forum sync (Obsidian markdown → Discord forum). Single-file CLI (`sync.py`) with `sync/` modules. Target: Artix Linux, Python 3.14.7. No server/daemon.
 
 ## Working directory
-Fixed per SPEC: `/home/ywbird/dev/slop-discord-wiki-sync/` (repo root = runtime cwd).
+Fixed per SPEC: `<repo-root>/` (repo root = runtime cwd).
 
 ## M0 first (blocking)
 Before coding, verify **O-1–O-7** in §19 against a test forum and record results in SPEC.md:
@@ -14,12 +14,11 @@ Before coding, verify **O-1–O-7** in §19 against a test forum and record resu
 - O-4–O-6: misc permissions/volume/Pillow need.
 - O-7: does `applied_tags` on `POST threads` actually apply tags? What happens with >5 or unknown IDs?
 
-## Production defaults (2026-10-15)
-- Forum: `1451142756495003658` (guild `761435154588631060` = Cognipotato, forum `도`), tag `1559989396378353684` (`bot`).
-- Set in `config.json` `defaults.forum_id` / `defaults.forum_tags`. No per-note overrides (`notes` is empty) - the vault notes inherit the defaults.
-- Old test forum `1559982578881011752` (guild `906454588276756490` = Nycko Server, `ㅅㄷㄴ`, tag `1559988468501844069` = `ㅅㄴ`) is no longer used. Its two leftover threads (피라네시, 픽션들) are orphaned in the index.
-- 2026-10-15: all 12 published vault notes posted to the production forum via `sync.py publish` (12/12, 0 failures), rerun via `sync --all` = all no-op.
-- Workflow rule from 도이: when asked to publish a note without naming a target, upload to **both** the Digital Garden and this Discord forum.
+## Deployment defaults (example)
+- Forum: `<FORUM_ID>` (guild `<GUILD_ID>`), tag `<TAG_ID>`.
+- Set in `config.json` `defaults.forum_id` / `defaults.forum_tags`. Per-note overrides go in `notes`; notes without an override inherit the defaults.
+- A separate test forum can be used for M0 checks; threads left there are orphaned in the index.
+- Workflow rule: when asked to publish a note without naming a target, upload to **both** the Digital Garden and this Discord forum.
 
 ## Implementation order
 Current work order: `docs/HANDOFF-2026-10-15-wiki-links.md` (SPEC v1.2 §8.1 conversion wiring + §8.2 wiki link resolution).

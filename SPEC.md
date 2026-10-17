@@ -11,7 +11,7 @@
 
 1. **§19 "구현 전 확인 목록"의 O-1 ~ O-3을 먼저 처리한다.** 셋 다 5분 내 실측 가능하고, 결과에 따라 세부 구현이 달라진다. 나머지는 이 스펙대로 구현하면 된다.
 2. **M1(§18)은 Discord API 없이 전부 구현·테스트할 수 있다.** 네트워크 접근 없이 순수 함수로 만들어라. M1 리뷰 통과 후 M2로 간다.
-3. 토큰/길드/포럼 ID는 아직 미확정이다. M2 착수 전에 사용자(도이)가 제공한다. 하드코딩하지 말고 §5 설정 파일에서 읽어라.
+3. 토큰/길드/포럼 ID는 아직 미확정이다. M2 착수 전에 사용자가 제공한다. 하드코딩하지 말고 §5 설정 파일에서 읽어라.
 4. 이 시스템은 사용자 머신(Artix Linux, Python 3.14.7)에서 단독 스크립트로 돈다. 서버/데몬 없음.
 
 ---
@@ -71,7 +71,7 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 
 ## 4. 산출물과 파일 레이아웃
 
-작업 디렉토리는 `/home/ywbird/dev/slop-discord-wiki-sync/`로 고정한다.
+작업 디렉토리는 `<repo-root>/`로 고정한다.
 
 ```
 slop-discord-wiki-sync/
@@ -110,7 +110,7 @@ slop-discord-wiki-sync/
 
 ```json
 {
-  "vault_root": "/home/ywbird/Documents/wiki",
+  "vault_root": "/path/to/vault",
   "index_path": "index.json",
   "logs_dir": "logs",
   "defaults": {
@@ -124,7 +124,7 @@ slop-discord-wiki-sync/
     "wiki_link_mode": "discord",
     "wiki_link_style": "url",
     "wiki_link_fallback": "garden",
-    "garden_base_url": "https://llmwiki.meliplug.info",
+    "garden_base_url": "https://garden.example.com",
     "image": {
       "max_bytes": 9500000,
       "max_width": 1600,
@@ -142,7 +142,7 @@ slop-discord-wiki-sync/
 - `defaults.forum_id`가 null이고 노트 frontmatter에도 `forum_id`가 없으면 그 노트는 **건너뛰고 경고**한다(임의 포럼 추측 금지).
 - 게시 위치 우선순위: frontmatter `discord_sync.forum_id` > `config.notes[경로].forum_id` > `defaults.forum_id`. 문서가 자기 게시 위치를 자기 안에 갖는 게 휴대성에 낫다.
 - 태그 우선순위: frontmatter `discord_sync.forum_tags` > `config.notes[경로].forum_tags` > `defaults.forum_tags`. 값은 **Discord 태그 ID 문자열 배열**이다(Obsidian 태그 아님, §13.7).
-- `guild_id` 우선순위(§8.2 점프 링크용): index 노트 항목 > `config.notes[경로]` > `defaults.guild_id`. 같은 길드의 포럼만 쓰면 `defaults.guild_id` 한 줄이면 된다(프로덕션: `761435154588631060`).
+- `guild_id` 우선순위(§8.2 점프 링크용): index 노트 항목 > `config.notes[경로]` > `defaults.guild_id`. 같은 길드의 포럼만 쓰면 `defaults.guild_id` 한 줄이면 된다.
 - `limit`은 1900 고정 권장. 올리려면 O-2 실측 후에.
 - `image.max_bytes`는 Discord 기본 한도 10MB보다 낮게 잡아 여유를 둔다.
 
@@ -156,7 +156,7 @@ slop-discord-wiki-sync/
 | `wiki_link_mode` | `text`(표시 텍스트만) / `garden`(가든 URL) / `discord`(게시된 포럼 스레드 링크, 기본). §8.2 |
 | `wiki_link_style` | `discord` 모드의 링크 형식: `url`(`[표시](https://discord.com/channels/{guild_id}/{thread_id})`, 기본) / `mention`(`<#thread_id>`) |
 | `wiki_link_fallback` | `discord` 모드에서 Discord 대상이 없을 때: `garden`(`dg-publish: true`인 노트는 가든 URL, 기본) / `text` |
-| `garden_base_url` | 가든 루트 URL(기본 `https://llmwiki.meliplug.info`). 슬러그 규칙은 §8.2 |
+| `garden_base_url` | 가든 루트 URL(기본 `https://garden.example.com`). 슬러그 규칙은 §8.2 |
 | `url`(구값) | `garden`의 별칭(하위 호환). 새 설정에는 쓰지 않는다 |
 | `image.one_image_per_slot` | true = 이미지 1장당 슬롯 1개(권장). false = 연속 이미지를 한 슬롯에 최대 10장 |
 | `image.max_width` | 초과 시 축소 재인코딩 |
@@ -198,7 +198,7 @@ discord_sync:
 ```
 
 - `enabled: true`가 없으면 동기화 대상이 아니다(명시적 옵트인). `enabled: false`는 명시적 제외.
-- `post_id` = 스레드 ID. `buffers`는 사람이 눈으로 확인할 수 있게 남긴다(도이 요구사항).
+- `post_id` = 스레드 ID. `buffers`는 사람이 눈으로 확인할 수 있게 남긴다(사용자 요구사항).
 - `content_hash`는 **변환 후 최종 슬롯 시퀀스 전체의 해시**다(§9.5). 노트 원문 해시가 아니다.
 - frontmatter는 반드시 **노트 파일 자체**를 편집해 갱신한다(YAML 블록 유지, 다른 키 보존, 들여쓰기 2칸).
 - 존재하지 않는 키를 임의로 추가하지 않는다. 위 스키마가 전체다.
@@ -305,7 +305,7 @@ Discord는 위키링크·콜아웃·각주·수식을 지원하지 않는다. �
 
 ### 8.2 위키링크 해석 (가든 / Discord 링크 치환)
 
-`[[노트]]`는 볼트 노트를 가리키는데 Discord는 위키링크를 모른다. 볼트 노트는 이미 가든(llmwiki.meliplug.info)과 Discord 포럼 양쪽에 게시되어 있으므로, 링크 대상을 **게시된 스레드 링크**로 바꾼다(2026-10-15 도이 요구).
+`[[노트]]`는 볼트 노트를 가리키는데 Discord는 위키링크를 모른다. 볼트 노트는 이미 가든(garden.example.com)과 Discord 포럼 양쪽에 게시되어 있으므로, 링크 대상을 **게시된 스레드 링크**로 바꾼다(2026-10-15 사용자 요구).
 
 **문법**
 
@@ -566,7 +566,7 @@ def diff(plan, state):
 ### 12.5 스냅샷 슬롯
 
 - `snapshot_attachment=true`(기본)이면 꼬리(버퍼 뒤)에 1개 유지한다.
-- 내용: 안내 1줄 + `synced_at` + 원문 링크(llmwiki.meliplug.info). 첨부: 노트 원본 .md.
+- 내용: 안내 1줄 + `synced_at` + 원문 링크(garden.example.com). 첨부: 노트 원본 .md.
 - 버퍼가 남아도 유지한다 -> 버퍼 소진 시에도 완전한 사본이 있다.
 - 갱신은 **같은 메시지 편집**으로 한다(새 파일 파트 + `attachments`에 새 파일 포함). 메시지를 삭제·재생성하지 않는다(순서 보존 + id churn 방지). 편집이 실패하면 그때만 삭제·재생성으로 폴백한다.
 - 원본 .md 해시가 같으면 편집하지 않는다.
@@ -594,7 +594,7 @@ POST /channels/{forum_id}/threads
 
 ```markdown
 # <노트 제목>
-<원문 링크(llmwiki.meliplug.info)>
+<원문 링크(garden.example.com)>
 
 ## 목차
 - [<섹션 제목>](https://discord.com/channels/{guild}/{thread}/{slot_message_id})

@@ -29,7 +29,7 @@ def default_link_ctx(cfg=None):
         "mode": cfg.get("wiki_link_mode", "discord"),
         "style": cfg.get("wiki_link_style", "url"),
         "fallback": cfg.get("wiki_link_fallback", "garden"),
-        "garden_base_url": cfg.get("garden_base_url", "https://llmwiki.meliplug.info"),
+        "garden_base_url": cfg.get("garden_base_url", "https://example.com"),
         "index_notes": {},
         "stem_map": {},
         "notes_cfg": {},

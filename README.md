@@ -216,6 +216,7 @@ slop-discord-wiki-sync/
   SPEC.md              # 설계 단일 소스(전체 스펙)
   AGENTS.md            # 에이전트 작업 규칙
   config.example.json  # 설정 예시
+  LICENSE              # VibeCoded AI-Slop License v1.0
 ```
 
 ---
@@ -229,4 +230,6 @@ slop-discord-wiki-sync/
 
 ## 라이선스
 
-미정. (필요하면 알려주세요 - MIT 등으로 추가합니다.)
+[VibeCoded AI-Slop License v1.0](LICENSE) - Copyright (c) 2026 ywbird
+
+무엇이든 마음대로 해도 된다. 허가도, 출처 표기도, 수정본 공개도 필요 없다.

@@ -16,7 +16,7 @@ def _wiki_link_ctx(cfg, index):
         "mode": d.get("wiki_link_mode", "discord"),
         "style": d.get("wiki_link_style", "url"),
         "fallback": d.get("wiki_link_fallback", "garden"),
-        "garden_base_url": d.get("garden_base_url", "https://llmwiki.meliplug.info"),
+        "garden_base_url": d.get("garden_base_url", "https://example.com"),
         "index_notes": index.get("notes", {}),
         "notes_cfg": cfg.get("notes", {}),
         "defaults_guild_id": d.get("guild_id"),
