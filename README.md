@@ -4,7 +4,7 @@
 
 Publish an Obsidian vault note as a **Discord forum thread**, then keep it in sync by **editing messages only** - so comments and deep links survive every update.
 
-- No server, no daemon. A single script (`sync.py`) plus `sync/` modules; the only third-party dependency is PyYAML.
+- No server, no daemon. A single script (`sync.py`) plus `sync/` modules.
 - One-way sync: vault -> Discord. Edits made on the Discord side are overwritten on the next sync.
 - `--dry-run` guarantees **zero HTTP calls** (enforced by a counter in the HTTP layer).
 
@@ -31,7 +31,7 @@ The fix:
 - **Obsidian -> Discord conversion**: wiki links, callouts, highlights, math, and footnotes are converted to Discord syntax (code fences and image blocks stay raw).
 - **Wiki link resolution**: `[[note]]` becomes a jump link to the published Discord thread (falling back to a garden URL, then plain display text). Resolution reads only `index.json` + vault frontmatter, so it makes zero HTTP calls and never recurses.
 - **Forum tags / thread title sync**: tags are applied by frontmatter priority, and title changes are merged into the same PATCH.
-- **Rate limit compliance**: a single serialized queue with a minimum interval (350 ms by default); 429s are retried honoring `retry_after`.
+- **Rate limit compliance**: requests go through discord.py's HTTP layer (bucket-aware rate limiting, 429/global handling, retries) with an additional minimum interval between requests (350 ms by default).
 - **Atomic state writes**: `index.json` is written to a temp file and `os.replace`d.
 
 ---
@@ -40,7 +40,7 @@ The fix:
 
 - Python 3.11+ (developed and verified on Artix Linux, Python 3.14.7)
 - [uv](https://docs.astral.sh/uv/) (recommended) or a plain `python3`
-- PyYAML - the only third-party dependency (`uv sync` installs it)
+- Dependencies: `discord.py` and `PyYAML` (`uv sync` installs them)
 - A Discord bot token. The bot is assumed to hold the **Administrator** role in the target guild (channel permission checks are skipped; unarchive/unlock/tags/rename all work).
 
 ---
@@ -50,14 +50,14 @@ The fix:
 ```bash
 git clone <repo-url> slop-discord-wiki-sync
 cd slop-discord-wiki-sync
-uv sync                              # creates .venv and installs PyYAML
+uv sync                              # creates .venv and installs dependencies
 cp config.example.json config.json   # fill in your values
 ```
 
 Without uv, install the dependency yourself and call `python3 sync.py` instead of `uv run sync.py`:
 
 ```bash
-python3 -m pip install pyyaml
+python3 -m pip install discord.py pyyaml
 ```
 
 Provide the token one of two ways:
@@ -211,7 +211,7 @@ slop-discord-wiki-sync/
     markdown.py        # block parser + Obsidian->Discord conversion
     chunker.py         # slot plan generation
     state.py           # index.json + frontmatter state
-    discord_api.py     # REST client + serialized queue/rate limit
+    discord_api.py     # sync wrapper over discord.py's HTTPClient
     images.py          # image resolution/normalization/hashing
     apply.py           # plan -> Discord
     tags.py            # forum tag resolution/validation
@@ -224,7 +224,7 @@ slop-discord-wiki-sync/
   SPEC.md              # single source of design (full spec)
   AGENTS.md            # working rules for coding agents
   config.example.json  # example config
-  pyproject.toml       # project metadata + PyYAML dependency (uv)
+  pyproject.toml       # project metadata + dependencies (uv)
   uv.lock              # locked dependency versions
   LICENSE              # VibeCoded AI-Slop License v1.0
 ```

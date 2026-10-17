@@ -346,7 +346,7 @@ def _do_rebalance(args, cfg, path, note_rel, body, fm, ds, slots):
 
 
 def _list_messages(api, channel_id, after=0):
-    return api._request("GET", f"/channels/{channel_id}/messages?limit=100") or []
+    return api.list_messages(channel_id, limit=100)
 
 
 def _resolve_applied_tags(api, forum_id, target_tags):

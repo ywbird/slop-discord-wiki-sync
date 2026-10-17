@@ -19,7 +19,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Text Processing :: Markup :: Markdown",
 ]
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "discord.py>=2.4"]
 
 # This repo is a script, not an installable package: `uv run sync.py ...` uses the
 # project environment without building/installing anything.

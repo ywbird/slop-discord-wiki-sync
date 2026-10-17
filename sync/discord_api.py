@@ -1,11 +1,19 @@
+"""Discord REST client. Thin sync wrapper over discord.py's HTTPClient.
+
+discord.py's HTTP layer handles the aiohttp session, 429/global rate limits,
+and request retries. We keep sync facades because the CLI is synchronous, plus
+the configured minimum interval before each request.
+"""
+
+import asyncio
+import atexit
+import io
 import json
 import time
-import urllib.request
-import urllib.error
-from email.generator import _make_boundary
 
-
-BASE = "https://discord.com/api/v10"
+import aiohttp
+import discord
+from discord.http import HTTPClient, Route
 
 
 class DiscordError(Exception):
@@ -16,16 +24,37 @@ class DiscordError(Exception):
 
 
 class DiscordAPI:
-    """Single serialized queue. All requests go through ._request()."""
-
     def __init__(self, token, cfg=None):
         cfg = cfg or {}
         rl = cfg.get("rate_limit", {})
         self.token = token
         self.min_interval_ms = rl.get("min_interval_ms", 350)
-        self.max_retries = rl.get("max_retries", 5)
-        self._last = 0.0
         self.calls = 0  # HTTP layer counter; dry-run asserts this stays 0
+        self._last = 0.0
+        self._closed = False
+        self._loop = asyncio.new_event_loop()
+        self._http = None
+        self._atexit = atexit.register(self.close)
+
+    async def _make_client(self):
+        http = HTTPClient(self._loop, max_ratelimit_timeout=300.0)
+        # Mirror static_login's session setup without the /users/@me call.
+        http.connector = aiohttp.TCPConnector(limit=0)
+        http._HTTPClient__session = aiohttp.ClientSession(
+            connector=http.connector,
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
+        http._global_over = asyncio.Event()
+        http._global_over.set()
+        http.token = self.token
+        return http
+
+    def _client(self):
+        if self._http is None:
+            self._http = self._loop.run_until_complete(self._make_client())
+        return self._http
+
+    # --- core ---
 
     def _sleep_between(self):
         now = time.monotonic()
@@ -34,55 +63,50 @@ class DiscordAPI:
             time.sleep(wait)
         self._last = time.monotonic()
 
-    def _request(self, method, path, json_body=None, multipart=None):
-        url = BASE + path
-        headers = {
-            "Authorization": f"Bot {self.token}",
-            "User-Agent": "DiscordBot (slop-wiki-sync, 1.0)",
-        }
-        data = None
-        if multipart is not None:
-            data, ctype = multipart
-            headers["Content-Type"] = ctype
-        elif json_body is not None:
-            data = json.dumps(json_body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
+    def _run(self, coro):
+        try:
+            return self._loop.run_until_complete(coro)
+        except discord.HTTPException as e:
+            raise DiscordError(e.status, e.text) from None
 
-        for attempt in range(self.max_retries + 1):
-            self._sleep_between()
-            self.calls += 1
-            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def _request(self, method, path, json_body=None, files=None):
+        route = Route(method, path)
+        kwargs = {}
+        if files:
+            payload = json_body or {}
+            form = [{"name": "payload_json", "value": json.dumps(payload),
+                     "content_type": "application/json"}]
+            for i, (fn, data) in enumerate(files):
+                form.append({
+                    "name": f"files[{i}]", "value": data,
+                    "filename": fn, "content_type": "application/octet-stream",
+                })
+            kwargs["form"] = form
+            kwargs["files"] = [discord.File(io.BytesIO(d), filename=fn) for fn, d in files]
+        elif json_body is not None:
+            kwargs["json"] = json_body
+        self._sleep_between()
+        self.calls += 1
+        return self._run(self._client().request(route, **kwargs))
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        atexit.unregister(self._atexit)
+        if self._http is not None:
             try:
-                with urllib.request.urlopen(req) as resp:
-                    body = resp.read().decode("utf-8")
-                    return json.loads(body) if body else None
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", "replace")
-                if e.code == 429:
-                    retry_after = None
-                    try:
-                        retry_after = float(e.headers.get("Retry-After") or 0)
-                    except (TypeError, ValueError):
-                        pass
-                    if not retry_after:
-                        try:
-                            retry_after = float(json.loads(body).get("retry_after", 1.0))
-                        except Exception:
-                            retry_after = 1.0
-                    global_block = e.headers.get("X-RateLimit-Global") == "true"
-                    time.sleep(max(retry_after, 0.1))
-                    continue
-                if 500 <= e.code < 600:
-                    time.sleep(min(2 ** attempt, 30))
-                    continue
-                raise DiscordError(e.code, body)
-            except urllib.error.URLError:
-                if attempt >= self.max_retries:
-                    raise
-                time.sleep(min(2 ** attempt, 30))
-        raise DiscordError(429, "rate limited: max retries exceeded")
+                self._run(self._http.close())
+            except Exception:  # noqa: BLE001
+                pass
+            self._http = None
+        try:
+            self._loop.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     # --- endpoints ---
+
     def create_thread(self, forum_id, name, message, applied_tags=None, flags=4096):
         payload = {"name": name, "message": message, "flags": flags}
         if applied_tags:
@@ -93,40 +117,27 @@ class DiscordAPI:
         return self._request("PATCH", f"/channels/{channel_id}", json_body=payload)
 
     def create_message(self, channel_id, content, flags=4096, attachments=None, files=None, description=None):
-        if files:
-            return self._create_message_multipart(channel_id, content, flags, files, description)
         payload = {
             "content": content,
             "flags": flags,
             "allowed_mentions": {"parse": []},
         }
-        if attachments is not None:
-            payload["attachments"] = attachments
-        return self._request("POST", f"/channels/{channel_id}/messages", json_body=payload)
-
-    def _create_message_multipart(self, channel_id, content, flags, files, description):
-        payload = {
-            "content": content,
-            "flags": flags,
-            "allowed_mentions": {"parse": []},
-            "attachments": [
+        if files:
+            payload["attachments"] = [
                 {"id": i, "filename": fn, "description": description or ""}
                 for i, (fn, _data) in enumerate(files)
-            ],
-        }
-        data, ctype = _encode_multipart(payload, files)
-        return self._request("POST", f"/channels/{channel_id}/messages", multipart=(data, ctype))
+            ]
+        elif attachments is not None:
+            payload["attachments"] = attachments
+        return self._request("POST", f"/channels/{channel_id}/messages", json_body=payload, files=files)
 
     def edit_message(self, channel_id, message_id, content, attachments, files=None, flags=None):
         payload = {"content": content, "attachments": attachments}
         if flags is not None:
             payload["flags"] = flags
-        if files:
-            data, ctype = _encode_multipart(payload, files)
-            return self._request("PATCH", f"/channels/{channel_id}/messages/{message_id}",
-                                 multipart=(data, ctype))
-        return self._request("PATCH", f"/channels/{channel_id}/messages/{message_id}",
-                             json_body=payload)
+        return self._request(
+            "PATCH", f"/channels/{channel_id}/messages/{message_id}", json_body=payload, files=files
+        )
 
     def get_message(self, channel_id, message_id):
         return self._request("GET", f"/channels/{channel_id}/messages/{message_id}")
@@ -134,23 +145,5 @@ class DiscordAPI:
     def get_channel(self, channel_id):
         return self._request("GET", f"/channels/{channel_id}")
 
-
-def _encode_multipart(payload, files):
-    boundary = _make_boundary()
-    lines = []
-    lines.append(f"--{boundary}\r\n".encode())
-    lines.append(b'Content-Disposition: form-data; name="payload_json"\r\n')
-    lines.append(b"Content-Type: application/json\r\n\r\n")
-    lines.append(json.dumps(payload).encode("utf-8"))
-    lines.append(b"\r\n")
-    for i, (fn, data) in enumerate(files):
-        lines.append(f"--{boundary}\r\n".encode())
-        lines.append(
-            f'Content-Disposition: form-data; name="files[{i}]"; filename="{fn}"\r\n'.encode()
-        )
-        lines.append(b"Content-Type: application/octet-stream\r\n\r\n")
-        lines.append(data)
-        lines.append(b"\r\n")
-    lines.append(f"--{boundary}--\r\n".encode())
-    body = b"".join(lines)
-    return body, f"multipart/form-data; boundary={boundary}"
+    def list_messages(self, channel_id, limit=100):
+        return self._request("GET", f"/channels/{channel_id}/messages?limit={int(limit)}") or []

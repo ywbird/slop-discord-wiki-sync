@@ -98,7 +98,7 @@ slop-discord-wiki-sync/
   .lock                # 동시 실행 방지 (§16)
 ```
 
-- 의존성: **표준 라이브러리를 우선**한다(사용자 머신에 pip/venv 마찰이 있고 passwordless sudo가 없다). HTTP는 `urllib.request`로 충분하다. multipart는 `email.mime` 또는 수동 조립으로 만든다. 외부 패키지는 정말 필요할 때만 쓰고 요구사항에 명시한다. 구현은 frontmatter 파싱에 **PyYAML**을 쓴다(`pyproject.toml`에 선언, `uv sync`로 설치).
+- 의존성: **표준 라이브러리를 우선**한다(사용자 머신에 pip/venv 마찰이 있고 passwordless sudo가 없다). 외부 패키지는 정말 필요할 때만 쓰고 요구사항에 명시한다. 구현은 frontmatter 파싱에 **PyYAML**, HTTP에 **discord.py**(저수준 `HTTPClient`/`Route` - 레이트리밋·재시도·multipart를 위임)를 쓴다. 둘 다 `pyproject.toml`에 선언하고 `uv sync`로 설치한다.
 - YAML은 `PyYAML`을 쓰거나, 필요한 키만 다루는 최소 파서를 직접 작성한다(frontmatter는 단순 중첩 맵 + 문자열 리스트 수준). 선택은 구현자 재량. 단 §6.1 스키마는 정확히 지켜야 한다.
 - 시간은 항상 ISO 8601 + 오프셋(`Asia/Seoul`)으로 기록한다.
 
@@ -575,7 +575,7 @@ def diff(plan, state):
 
 ## 13. Discord REST API 계약
 
-Base: `https://discord.com/api/v10`. 헤더: `Authorization: Bot <token>`, `User-Agent: DiscordBot (...)`.
+Base: `https://discord.com/api/v10`. 헤더: `Authorization: Bot <token>`, `User-Agent: DiscordBot (...)`. 구현은 이 계약을 `discord.py`의 `HTTPClient`/`Route`로 수행한다(레이트리밋·재시도는 discord.py가 처리, 요청 사이 최소 간격 350ms는 자체 적용).
 
 ### 13.1 포럼 글 생성
 

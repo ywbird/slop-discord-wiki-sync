@@ -4,7 +4,7 @@
 
 Obsidian 위키 볼트의 마크다운 노트 1개를 **Discord 포럼 글 1개**로 게시하고, 이후 노트 수정을 **메시지 편집만으로** 반영하는 단일 CLI 도구.
 
-- 서버·데몬 없음. 단독 스크립트(`sync.py`) + `sync/` 모듈. 서드파티 의존성은 PyYAML 하나뿐.
+- 서버·데몬 없음. 단독 스크립트(`sync.py`) + `sync/` 모듈.
 - 단방향 동기화: 위키 -> Discord. Discord 쪽 수정은 다음 동기화에서 덮인다.
 - `--dry-run`은 **HTTP 호출 0회**를 보장한다(테스트로 강제).
 
@@ -31,7 +31,7 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 - **Obsidian -> Discord 변환**: 위키링크·콜아웃·형광·수식·각주를 Discord 문법으로 변환한다(코드펜스·이미지 블록은 원문 유지).
 - **위키링크 해석**: `[[노트]]`를 게시된 Discord 스레드 점프 링크로 치환한다(없으면 가든 URL, 그다음 표시 텍스트). 해석은 `index.json` + 볼트 frontmatter만 읽으므로 HTTP 0회·재귀 없음.
 - **포럼 태그 / 스레드 제목 동기화**: frontmatter 우선순위에 따라 태그를 적용하고, 제목 변경도 같은 PATCH에 병합한다.
-- **레이트리밋 준수**: 단일 직렬 큐 + 최소 간격(기본 350ms), 429는 `retry_after`를 존중해 재시도.
+- **레이트리밋 준수**: 요청은 discord.py HTTP 계층(버킷 기반 레이트리밋, 429/글로벌 처리, 재시도)을 거치고, 추가로 요청 사이 최소 간격(기본 350ms)을 둔다.
 - **원자적 상태 쓰기**: `index.json`은 임시 파일 + `os.replace`.
 
 ---
@@ -40,7 +40,7 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 
 - Python 3.11+ (개발·검증 환경: Artix Linux, Python 3.14.7)
 - [uv](https://docs.astral.sh/uv/) (권장) 또는 일반 `python3`
-- PyYAML - 유일한 서드파티 의존성(`uv sync`가 설치한다)
+- 의존성: `discord.py`, `PyYAML` (`uv sync`가 설치한다)
 - Discord 봇 토큰. 봇은 대상 서버에서 **관리자 역할**을 갖는 것을 전제로 한다(채널 권한 체크 생략, unarchive/unlock/태그/이름 변경 가능).
 
 ---
@@ -50,14 +50,14 @@ Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메
 ```bash
 git clone <repo-url> slop-discord-wiki-sync
 cd slop-discord-wiki-sync
-uv sync                              # .venv 생성 + PyYAML 설치
+uv sync                              # .venv 생성 + 의존성 설치
 cp config.example.json config.json   # 값 채우기
 ```
 
 uv를 안 쓴다면 의존성을 직접 설치하고, `uv run sync.py` 대신 `python3 sync.py`로 실행한다.
 
 ```bash
-python3 -m pip install pyyaml
+python3 -m pip install discord.py pyyaml
 ```
 
 토큰은 둘 중 하나로 준다.
@@ -211,7 +211,7 @@ slop-discord-wiki-sync/
     markdown.py        # 블록 파서 + Obsidian->Discord 변환
     chunker.py         # 슬롯 계획 생성
     state.py           # index.json + frontmatter 상태
-    discord_api.py     # REST 클라이언트 + 직렬 큐/레이트리밋
+    discord_api.py     # discord.py HTTPClient 동기 래퍼
     images.py          # 이미지 해석/정규화/해시
     apply.py           # 계획 -> Discord 반영
     tags.py            # 포럼 태그 해석/검증
@@ -224,7 +224,7 @@ slop-discord-wiki-sync/
   SPEC.md              # 설계 단일 소스(전체 스펙)
   AGENTS.md            # 에이전트 작업 규칙
   config.example.json  # 설정 예시
-  pyproject.toml       # 프로젝트 메타데이터 + PyYAML 의존성 (uv)
+  pyproject.toml       # 프로젝트 메타데이터 + 의존성 (uv)
   uv.lock              # 의존성 버전 고정
   LICENSE              # VibeCoded AI-Slop License v1.0
 ```
