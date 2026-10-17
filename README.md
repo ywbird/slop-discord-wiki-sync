@@ -1,235 +1,235 @@
 # slop-discord-wiki-sync
 
-Obsidian 위키 볼트의 마크다운 노트 1개를 **Discord 포럼 글 1개**로 게시하고, 이후 노트 수정을 **메시지 편집만으로** 반영하는 단일 CLI 도구.
+[English](README.md) | [한국어](README.ko.md)
 
-*Publish Obsidian vault notes as Discord forum threads and keep them in sync by editing messages only - comments and deep links survive every update.*
+Publish an Obsidian vault note as a **Discord forum thread**, then keep it in sync by **editing messages only** - so comments and deep links survive every update.
 
-- 서버·데몬 없음. 단독 스크립트(`sync.py`) + 표준 라이브러리만 사용.
-- 단방향 동기화: 위키 -> Discord. Discord 쪽 수정은 다음 동기화에서 덮인다.
-- `--dry-run`은 **HTTP 호출 0회**를 보장한다(테스트로 강제).
-
----
-
-## 왜 이런 구조인가
-
-Discord 포럼 글의 메시지는 **중간 삽입이 불가능**하다. 새 메시지는 항상 스레드 맨 끝에 붙는다. 그런데 글에는 사람들이 댓글을 단다. 그래서 "노트를 수정했으니 본문을 다시 올린다"를 새 메시지로 하면 수정본이 댓글 아래로 밀려 문서가 읽히지 않는다.
-
-해결:
-
-1. **게시 시점에 본문 슬롯을 미리 전부 만든다.** 이후 수정은 그 슬롯들의 편집(edit)만으로 처리한다. 편집은 순서를 바꾸지 않으므로 댓글이 있어도 문서 상단이 그대로 유지된다.
-2. **꼬리에 예비 슬롯(버퍼)을 미리 확보**한다. 문서가 나중에 길어져 슬롯이 더 필요할 때 새 메시지를 만들면 댓글 뒤로 밀리기 때문이다.
+- No server, no daemon. A single script (`sync.py`) plus `sync/` modules, standard library only.
+- One-way sync: vault -> Discord. Edits made on the Discord side are overwritten on the next sync.
+- `--dry-run` guarantees **zero HTTP calls** (enforced by a counter in the HTTP layer).
 
 ---
 
-## 주요 특징
+## Why it works this way
 
-- **슬롯 모델**: Discord 메시지 1개 = 슬롯 1개. 역할은 `content`(본문 텍스트) / `image`(이미지 첨부 1개) / `buffer`(예비, `-# (reserved)`) / `snapshot`(원본 `.md` 첨부).
-- **적응형 버퍼**: 슬롯 수 K에 비례해 예비 슬롯 N을 확보(`ratio` 0.5, `min` 2, `max` 10). 축소는 삭제가 아니라 후행 슬롯을 `buffer`로 되돌려 처리한다(순서 불변).
-- **해시 기반 no-op**: 역할 + 슬롯 해시가 같으면 편집하지 않는다. 최상위 `content_hash`가 같으면 동기화 자체를 건너뛴다(HTTP 0회).
-- **정확한 길이 계산**: UTF-16 코드 유닛(`len(s.encode("utf-16-le"))//2`)으로 센다. NFC 정규화 필수(한글 NFD는 글자 수가 부풀어 오른다).
-- **첨부 보존**: 메시지 편집 시 `attachments`를 생략하면 기존 첨부가 삭제되므로, 항상 전체 `attachments` 배열을 보낸다.
-- **Obsidian -> Discord 변환**: 위키링크·콜아웃·형광·수식·각주를 Discord 문법으로 변환한다(코드펜스·이미지 블록은 원문 유지).
-- **위키링크 해석**: `[[노트]]`를 게시된 Discord 스레드 점프 링크로 치환한다(없으면 가든 URL, 그다음 표시 텍스트). 해석은 `index.json` + 볼트 frontmatter만 읽으므로 HTTP 0회·재귀 없음.
-- **포럼 태그 / 스레드 제목 동기화**: frontmatter 우선순위에 따라 태그를 적용하고, 제목 변경도 같은 PATCH에 병합한다.
-- **레이트리밋 준수**: 단일 직렬 큐 + 최소 간격(기본 350ms), 429는 `retry_after`를 존중해 재시도.
-- **원자적 상태 쓰기**: `index.json`은 임시 파일 + `os.replace`.
+Discord forum messages **cannot be inserted in the middle**. New messages always land at the end of the thread. But people comment on posts. So if "the note changed, post the body again" were done as a new message, the updated document would be pushed below the comments and become unreadable.
+
+The fix:
+
+1. **Create every body slot up front, at publish time.** Later updates are applied by editing those slots. Edits never change order, so the top of the document stays put even with comments present.
+2. **Reserve spare slots (buffers) at the tail.** When the document grows and needs more slots, creating new messages would push them below the comments.
 
 ---
 
-## 요구사항
+## Features
 
-- Python 3.11+ (개발·검증 환경: Artix Linux, Python 3.14.7)
-- 외부 패키지 없음 - 표준 라이브러리만 사용
-- Discord 봇 토큰. 봇은 대상 서버에서 **관리자 역할**을 갖는 것을 전제로 한다(채널 권한 체크 생략, unarchive/unlock/태그/이름 변경 가능).
+- **Slot model**: one Discord message = one slot. Roles: `content` (body text), `image` (exactly one attachment), `buffer` (spare, `-# (reserved)`), `snapshot` (the original `.md` as an attachment).
+- **Adaptive buffers**: reserve N spare slots proportional to the slot count K (`ratio` 0.5, `min` 2, `max` 10). Shrinking never deletes: trailing slots revert to the `buffer` role, so order is immutable.
+- **Hash-based no-op**: if role + slot hash are unchanged, nothing is edited. If the top-level `content_hash` matches, the sync is skipped entirely (zero HTTP).
+- **Exact length accounting**: measured in UTF-16 code units (`len(s.encode("utf-16-le"))//2`). NFC normalization is mandatory (NFD Korean inflates the character count).
+- **Attachment preservation**: omitting `attachments` on a message edit deletes existing attachments, so the full `attachments` array is always sent.
+- **Obsidian -> Discord conversion**: wiki links, callouts, highlights, math, and footnotes are converted to Discord syntax (code fences and image blocks stay raw).
+- **Wiki link resolution**: `[[note]]` becomes a jump link to the published Discord thread (falling back to a garden URL, then plain display text). Resolution reads only `index.json` + vault frontmatter, so it makes zero HTTP calls and never recurses.
+- **Forum tags / thread title sync**: tags are applied by frontmatter priority, and title changes are merged into the same PATCH.
+- **Rate limit compliance**: a single serialized queue with a minimum interval (350 ms by default); 429s are retried honoring `retry_after`.
+- **Atomic state writes**: `index.json` is written to a temp file and `os.replace`d.
 
 ---
 
-## 설치
+## Requirements
+
+- Python 3.11+ (developed and verified on Artix Linux, Python 3.14.7)
+- No third-party packages - standard library only
+- A Discord bot token. The bot is assumed to hold the **Administrator** role in the target guild (channel permission checks are skipped; unarchive/unlock/tags/rename all work).
+
+---
+
+## Install
 
 ```bash
 git clone <repo-url> slop-discord-wiki-sync
 cd slop-discord-wiki-sync
-cp config.example.json config.json   # 값 채우기
+cp config.example.json config.json   # fill in your values
 ```
 
-토큰은 둘 중 하나로 준다.
+Provide the token one of two ways:
 
 ```bash
-# 1) secrets.json (권장, mode 0600)
+# 1) secrets.json (recommended, mode 0600)
 printf '{"bot_token": "YOUR_BOT_TOKEN"}' > secrets.json && chmod 600 secrets.json
 
-# 2) 환경변수
+# 2) environment variable
 export DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN
 ```
 
 ---
 
-## 설정
+## Configuration
 
 ### `config.json`
 
-| 키 | 의미 |
+| Key | Meaning |
 |---|---|
-| `vault_root` | Obsidian 볼트 절대 경로 |
-| `index_path` | 사이드카 상태 파일(기본 `index.json`) |
-| `defaults.forum_id` | 게시 대상 포럼 채널 ID. `null`이면 노트별 지정 필요 |
-| `defaults.forum_tags` | 적용할 Discord 태그 ID 목록(최대 5) |
-| `defaults.guild_id` | 점프 링크 생성용 길드 ID |
-| `defaults.limit` | 메시지 1개 최대 길이(기본 1900) |
+| `vault_root` | Absolute path to the Obsidian vault |
+| `index_path` | Sidecar state file (default `index.json`) |
+| `defaults.forum_id` | Target forum channel ID. If `null`, each note must specify one |
+| `defaults.forum_tags` | Discord tag IDs to apply (max 5) |
+| `defaults.guild_id` | Guild ID used to build jump links |
+| `defaults.limit` | Max length of a single message (default 1900) |
 | `defaults.buffer_policy` | `{mode, min, max, ratio}` |
-| `defaults.snapshot_attachment` | 원본 `.md` 첨부 슬롯 생성 여부 |
-| `defaults.callout_mode` | `quote`(콜아웃을 인용으로) / `strip`(제거) |
-| `defaults.wiki_link_mode` | `discord`(기본) / `garden` / `text` |
-| `defaults.wiki_link_style` | `url`(기본) / `mention` |
-| `defaults.wiki_link_fallback` | `garden`(기본) / `text` |
-| `defaults.garden_base_url` | 가든 URL 접두사 |
+| `defaults.snapshot_attachment` | Whether to create the original-`.md` attachment slot |
+| `defaults.callout_mode` | `quote` (callouts become quotes) / `strip` (remove) |
+| `defaults.wiki_link_mode` | `discord` (default) / `garden` / `text` |
+| `defaults.wiki_link_style` | `url` (default) / `mention` |
+| `defaults.wiki_link_fallback` | `garden` (default) / `text` |
+| `defaults.garden_base_url` | Garden URL prefix |
 | `defaults.image` | `{max_bytes, max_width, format, one_image_per_slot}` |
 | `defaults.rate_limit` | `{min_interval_ms, max_retries}` |
-| `notes` | 노트별 오버라이드(경로 -> 설정). 비어 있으면 전부 `defaults` 상속 |
+| `notes` | Per-note overrides (path -> settings). Empty means everything inherits `defaults` |
 
-우선순위: frontmatter `discord_sync.*` > `config.notes[경로]` > `defaults`.
+Priority: frontmatter `discord_sync.*` > `config.notes[path]` > `defaults`.
 
-### 노트 frontmatter (옵트인)
+### Note frontmatter (opt-in)
 
 ```yaml
 ---
 title: UBL
 discord_sync:
-  enabled: true          # true가 없으면 동기화 대상이 아니다
-  forum_id: "1234567890" # 생략 시 defaults 상속
+  enabled: true          # without true, the note is not synced
+  forum_id: "1234567890" # omit to inherit defaults
   forum_tags: ["1111111111111111111"]
-  post_id: "9876543210"  # 게시 후 스크립트가 기록
+  post_id: "9876543210"  # written by the script after publishing
   content_hash: "sha256:..."
   synced_at: "2026-10-14T21:00:00+09:00"
 ---
 ```
 
-`sync --all`은 볼트를 재귀 탐색해 `discord_sync.enabled: true`인 노트만 처리한다.
+`sync --all` walks the vault recursively and processes only notes with `discord_sync.enabled: true`.
 
 ---
 
-## 사용법
+## Usage
 
 ```bash
-python3 sync.py publish <note> [--force]              # 신규 게시
-python3 sync.py sync <note> [--dry-run] [--diff]      # 변경 반영
-python3 sync.py sync --all [--dry-run]                # enabled 노트 전체
-python3 sync.py status <note>                         # 계획과 상태의 차이만 출력
-python3 sync.py verify <note>                         # GET으로 실제 스레드와 state 대조
-python3 sync.py adopt <note> --post-id <id> [--starter-id <id>]   # 기존 글 재입양
-python3 sync.py rebalance <note> --yes                # 새 스레드로 재게시(댓글·딥링크 소실)
-python3 sync.py doctor                                # 토큰/볼트/모듈 점검
-python3 sync.py doctor --tags <forum_id>              # 포럼의 available_tags 출력
+python3 sync.py publish <note> [--force]              # publish a new thread
+python3 sync.py sync <note> [--dry-run] [--diff]      # apply changes
+python3 sync.py sync --all [--dry-run]                # every enabled note
+python3 sync.py status <note>                         # print plan vs. state diff
+python3 sync.py verify <note>                         # GET the live thread and compare with state
+python3 sync.py adopt <note> --post-id <id> [--starter-id <id>]   # re-adopt an existing thread
+python3 sync.py rebalance <note> --yes                # repost as a new thread (loses comments/deep links)
+python3 sync.py doctor                                # check token/vault/modules
+python3 sync.py doctor --tags <forum_id>              # print the forum's available_tags
 ```
 
-공통 옵션: `--config <path>`(기본 `./config.json`), `--json`(기계 판독 출력), `--verbose`.
+Common options: `--config <path>` (default `./config.json`), `--json` (machine-readable output), `--verbose`.
 
-`<note>`는 볼트 루트 기준 상대 경로(절대 경로도 허용하되 볼트 안이어야 한다).
+`<note>` is a vault-relative path (absolute paths are allowed but must stay inside the vault).
 
-예시:
+Examples:
 
 ```bash
-# 변경 사항만 확인 (네트워크 호출 없음)
+# Preview changes only (no network calls)
 python3 sync.py sync "UBL.md" --dry-run --diff
 
-# 실제 반영
+# Apply
 python3 sync.py sync "UBL.md"
 
-# 볼트 전체 동기화
+# Sync the whole vault
 python3 sync.py sync --all
 ```
 
-### 종료 코드
+### Exit codes
 
-| 코드 | 의미 |
+| Code | Meaning |
 |---|---|
-| 0 | 성공(변경 없음 포함) |
-| 1 | 사용법/인자 오류 |
-| 2 | 설정·토큰·포럼 미지정 |
-| 3 | 볼트/노트 읽기 오류 |
-| 4 | 부분 실패(일부 슬롯 실패). 재실행으로 이어서 처리 가능 |
-| 5 | 상태 불일치(수동 조치 필요). `doctor`/`adopt` 안내 |
-| 6 | 버퍼 소진 + 성장 초과 -> `rebalance` 권고 |
+| 0 | Success (including no changes) |
+| 1 | Usage / argument error |
+| 2 | Config, token, or forum not specified |
+| 3 | Vault / note read error |
+| 4 | Partial failure (some slots failed). Re-running continues from there |
+| 5 | State mismatch (manual action needed). Points to `doctor`/`adopt` |
+| 6 | Buffers exhausted + growth exceeded -> `rebalance` recommended |
 
 ---
 
-## 동작 원리 요약
+## How it works
 
 ```
-read -> parse(블록 분해) -> convert(Obsidian->Discord) -> chunk(슬롯 계획)
-     -> diff(계획 vs index.json) -> apply(생성/편집) -> persist(index.json + frontmatter)
+read -> parse (block split) -> convert (Obsidian->Discord) -> chunk (slot plan)
+     -> diff (plan vs index.json) -> apply (create/edit) -> persist (index.json + frontmatter)
 ```
 
-- **불변식**: 슬롯 순서는 절대 바꾸지 않는다. 줄이는 것도 삭제가 아니라 후행 슬롯을 `buffer`로 되돌리는 방식이다. 버퍼는 왼쪽부터 소비된다.
-- **콘텐츠 슬롯에는 첨부가 없어야 하고, 이미지 슬롯은 첨부 1개만 갖는다.** 빈 콘텐츠는 허용되지 않는다(플레이스홀더 사용).
-- **`synced_at`** = "Discord 상태를 실제로 쓴 시각". no-op이면 갱신되지 않는다(HTTP 0회 불변식 유지).
-- **`index.json`이 스레드 단위 진실**이다. frontmatter와 어긋나면 index.json을 신뢰한다.
+- **Invariant**: slot order is never changed. Shrinking is not deletion either - trailing slots revert to the `buffer` role. Buffers are consumed left to right.
+- **Content slots must have no attachments; image slots own exactly one.** Empty content is not allowed (a placeholder is used).
+- **`synced_at`** = "the time the Discord state was actually written". It is not updated on a no-op (which keeps the zero-HTTP invariant).
+- **`index.json` is the per-thread source of truth.** If it disagrees with frontmatter, `index.json` wins.
 
 ---
 
-## 마크다운 변환 (Obsidian -> Discord)
+## Markdown conversion (Obsidian -> Discord)
 
-| 입력 | 출력 |
+| Input | Output |
 |---|---|
-| `[[노트]]`, `[[노트\|표시]]` | 모드별(기본: 게시된 스레드 점프 링크) |
-| `![[파일.png]]`, `![alt](경로.png)` | 이미지 슬롯(alt는 `description`) |
-| `> [!note] 제목` + 본문 | `> **제목**` + `> 본문` |
-| `$수식$`, `==형광==`, `^[각주]`, `[^1]` | 마커 제거 후 텍스트로 강등 |
-| 코드펜스 | 원문 유지(원자적 블록) |
-| `#`~`######` 헤딩 | 그대로(Discord는 `#`/`##`/`###`만 렌더) |
+| `[[note]]`, `[[note\|display]]` | Mode-dependent (default: jump link to the published thread) |
+| `![[file.png]]`, `![alt](path.png)` | Image slot (alt becomes `description`) |
+| `> [!note] Title` + body | `> **Title**` + `> body` |
+| `$math$`, `==highlight==`, `^[footnote]`, `[^1]` | Markers stripped, demoted to text |
+| Code fences | Kept raw (atomic block) |
+| `#`-`######` headings | Kept as-is (Discord renders only `#`/`##`/`###`) |
 
-변환은 **텍스트 블록에만** 적용한다. `![[...]]`는 이미지 임베드이므로 위키링크 치환에서 제외한다(정규식 negative lookbehind `(?<!!)` 필수).
+Conversion applies to **text blocks only**. `![[...]]` is an image embed, so it is excluded from wiki-link substitution (the regex requires the negative lookbehind `(?<!!)`).
 
 ---
 
-## 테스트
+## Tests
 
 ```bash
-python3 -m tests.test_m1     # 24/24 passed (pytest 불필요)
+python3 -m tests.test_m1     # 24/24 passed (no pytest needed)
 ```
 
-M1 단위 테스트는 네트워크 없이 돈다. 경계 분할, 코드펜스 원자성, NFD->NFC 길이, 이모지(서로게이트 페어), 위키링크/콜아웃 변환, 버퍼 정책, 결정성, 태그 우선순위·검증, `--dry-run` HTTP 0회를 검증한다.
+The M1 unit tests run without network access. They cover boundary splits, code fence atomicity, NFD->NFC length, emoji (surrogate pairs), wiki-link/callout conversion, buffer policy, determinism, tag priority and validation, and the zero-HTTP `--dry-run` invariant.
 
 ---
 
-## 파일 구조
+## Layout
 
 ```
 slop-discord-wiki-sync/
-  sync.py              # 엔트리포인트
+  sync.py              # entry point
   sync/
-    config.py          # 설정 로드/검증
-    vault.py           # 볼트 노트 읽기, frontmatter, NFC
-    markdown.py        # 블록 파서 + Obsidian->Discord 변환
-    chunker.py         # 슬롯 계획 생성
-    state.py           # index.json + frontmatter 상태
-    discord_api.py     # REST 클라이언트 + 직렬 큐/레이트리밋
-    images.py          # 이미지 해석/정규화/해시
-    apply.py           # 계획 -> Discord 반영
-    tags.py            # 포럼 태그 해석/검증
-    cli.py             # 인자 파싱, 출력
+    config.py          # config load/validate
+    vault.py           # vault note reading, frontmatter, NFC
+    markdown.py        # block parser + Obsidian->Discord conversion
+    chunker.py         # slot plan generation
+    state.py           # index.json + frontmatter state
+    discord_api.py     # REST client + serialized queue/rate limit
+    images.py          # image resolution/normalization/hashing
+    apply.py           # plan -> Discord
+    tags.py            # forum tag resolution/validation
+    cli.py             # argument parsing, output
   tests/
-    test_m1.py         # M1 단위 테스트
-    fixtures/          # 입력 노트 + 기대 계획
+    test_m1.py         # M1 unit tests
+    fixtures/          # input notes + expected plans
   docs/
     HANDOFF-2026-10-15-wiki-links.md
-  SPEC.md              # 설계 단일 소스(전체 스펙)
-  AGENTS.md            # 에이전트 작업 규칙
-  config.example.json  # 설정 예시
+  SPEC.md              # single source of design (full spec)
+  AGENTS.md            # working rules for coding agents
+  config.example.json  # example config
   LICENSE              # VibeCoded AI-Slop License v1.0
 ```
 
 ---
 
-## 문서
+## Docs
 
-- **`SPEC.md`** - 설계 단일 소스. 데이터 모델, 변환 규칙, 청킹, 동기화 알고리즘, REST 계약, CLI 명세, 테스트 계획, 마일스톤.
-- **`AGENTS.md`** - 코딩 에이전트용 작업 규칙(놓치기 쉬운 제약 모음).
+- **`SPEC.md`** - the single source of design: data model, conversion rules, chunking, sync algorithm, REST contract, CLI spec, test plan, milestones.
+- **`AGENTS.md`** - working rules for coding agents (a collection of easy-to-miss constraints).
 
 ---
 
-## 라이선스
+## License
 
 [VibeCoded AI-Slop License v1.0](LICENSE) - Copyright (c) 2026 ywbird
 
-무엇이든 마음대로 해도 된다. 허가도, 출처 표기도, 수정본 공개도 필요 없다.
+Do whatever you want with it. No permission, attribution, or publishing of modifications required.
