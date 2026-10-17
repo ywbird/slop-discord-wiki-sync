@@ -1,7 +1,13 @@
+# 로컬 설정 / 비밀
+config.json
 secrets.json
+.env
+
+# 런타임 상태
 index.json
 logs/
 .lock
+
+# 파이썬
 __pycache__/
 *.pyc
-.env

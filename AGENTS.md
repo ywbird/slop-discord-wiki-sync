@@ -22,7 +22,7 @@ Before coding, verify **O-1–O-7** in §19 against a test forum and record resu
 - Workflow rule from 도이: when asked to publish a note without naming a target, upload to **both** the Digital Garden and this Discord forum.
 
 ## Implementation order
-Current work order: `HANDOFF-2026-10-15-wiki-links.md` (SPEC v1.2 §8.1 conversion wiring + §8.2 wiki link resolution).
+Current work order: `docs/HANDOFF-2026-10-15-wiki-links.md` (SPEC v1.2 §8.1 conversion wiring + §8.2 wiki link resolution).
 
 M1 (pure, no network) → M2 (publish) → M3 (sync) → M4 (images) → M5 (ops). `--dry-run` must make **0 HTTP calls** (enforce via HTTP layer counter).
 
